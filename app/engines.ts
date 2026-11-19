@@ -394,11 +394,19 @@ async function requirePackageMagic(path: string): Promise<void> {
     const head = Buffer.alloc(4);
     const { bytesRead } = await handle.read(head, 0, 4, 0);
     if (bytesRead >= 4 && head[0] === 0x7f) return;
+    if (bytesRead < 4) {
+      // A read-only folder or a full disk leaves an empty or truncated file and
+      // the packer's exit may still look fine. Say what to check instead of
+      // blaming the package format.
+      throw new Error(
+        `the packer wrote only ${bytesRead} bytes to ${path} — check that the folder is writable and the disk has free space, then build again`,
+      );
+    }
   } finally {
     await handle.close();
   }
   throw new Error(
-    "the packer reported success but its output is not a PS5 package (no 0x7F container header)",
+    "the packer wrote a file that is not a PS5 package (no 0x7F header) — if the disk was full or the folder read-only, the write was probably truncated; check free space and permissions",
   );
 }
 

@@ -436,8 +436,9 @@ async function main(): Promise<void> {
     // ---------------- two subscribers at once ----------------
 
     const first = new AbortController();
+    const second = new AbortController();
     const streamA = await fetch(`${BASE}/api/events`, { signal: first.signal });
-    const streamB = await fetch(`${BASE}/api/events`);
+    const streamB = await fetch(`${BASE}/api/events`, { signal: second.signal });
     const readerA = streamA.body!.getReader();
     const readerB = streamB.body!.getReader();
     const decoder = new TextDecoder();
@@ -467,7 +468,88 @@ async function main(): Promise<void> {
     const frame = await readWithin(readerB, 3000);
     check("the surviving subscriber still receives events", frame.includes("state"), frame.trim().slice(0, 60));
     await fetch(`${BASE}/api/game/PSSE00001`, { method: "DELETE" });
-    readerB.cancel().catch(() => undefined);
+    // Aborting closes the connection; cancelling the reader alone left the
+    // server counting a subscriber that was no longer there.
+    second.abort();
+
+    // A second subscriber joins while work is running, both drop, and a late
+    // joiner must see the finished job. Counted, not assumed.
+    await fetch(`${BASE}/api/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: [{ titleId: HOLD_ID, title: "Held stream", path: HOLD_FIXTURE, kind: "Game folder", size: 0 }] }),
+    });
+    const streamWork = Bun.spawn(["bash", "-c", "sleep 0.6"], { stdout: "ignore", stderr: "ignore" });
+    await fetch(`${BASE}/api/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ titleId: HOLD_ID }),
+    });
+    await streamWork.exited;
+    const joinA = new AbortController();
+    const joinB = new AbortController();
+    const joinStart = Date.now();
+    const resA = await fetch(`${BASE}/api/events`, { signal: joinA.signal });
+    const resB = await fetch(`${BASE}/api/events`, { signal: joinB.signal });
+    const readA = (async () => {
+      let text = "";
+      try {
+        const reader = resA.body!.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          text += new TextDecoder().decode(value);
+        }
+      } catch {
+        /* closed */
+      }
+      return text;
+    })();
+    const readB = (async () => {
+      try {
+        const reader = resB.body!.getReader();
+        while (true) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      } catch {
+        /* closed */
+      }
+    })();
+    await Bun.sleep(300);
+    const counted = Number((await getState() as any).streams);
+    check("two subscribers are counted while both are open", counted >= 2, String(counted));
+    joinA.abort();
+    joinB.abort();
+    const textA = await readA;
+    await readB;
+    const dropAt = Date.now();
+    let left = counted;
+    while (Date.now() - dropAt < 1000) {
+      left = Number((await getState() as any).streams);
+      if (left === 0) break;
+      await Bun.sleep(30);
+    }
+    check("both disconnects are cleaned up inside 1s", left === 0, `${left} left after ${Date.now() - dropAt}ms`);
+    const pcts = [...textA.matchAll(/"type":"progress"[^}]*"pct":([0-9.]+)/g)].map((match) => Number(match[1]));
+    const monotone = pcts.every((pct, index) => index === 0 || pct >= pcts[index - 1]);
+    const duplicates = pcts.filter((pct, index) => index > 0 && pct === pcts[index - 1]).length;
+    check("progress never goes backwards", monotone, pcts.join(","));
+    check("no progress frame is repeated", duplicates === 0, `${duplicates} repeats of ${pcts.length}`);
+    let finalGame: any = null;
+    for (let i = 0; i < 80; i++) {
+      finalGame = ((await getState()) as any).games.find((game: any) => game.titleId === HOLD_ID);
+      if (finalGame && finalGame.state !== "building") break;
+      await Bun.sleep(100);
+    }
+    // The job may have finished as built, or refused and stayed dumped: what
+    // matters is that it is terminal and no subscriber is left holding it.
+    check(
+      "a late joiner sees a terminal job, not a stale spinner",
+      Boolean(finalGame) && !["building", "installing"].includes(finalGame?.state) && Number((await getState() as any).streams) === 0,
+      `${finalGame?.state} streams=${(await getState() as any).streams}`,
+    );
+    check("the stream restart block finishes inside 4s", Date.now() - joinStart < 4000, `${Date.now() - joinStart}ms`);
 
     const scan = await post("/api/scan", { dir: FIXTURE_DIR });
     check("scan finds the dump", scan.data.found?.length === 1, `${scan.data.found?.length} found`);
@@ -827,8 +909,8 @@ async function main(): Promise<void> {
         ).then((answer) => answer.parsed?.added),
       ),
     );
-    const duplicates = (await getState()).games.filter((game) => game.titleId === "PSTA00021").length;
-    check("five imports of one title leave one entry", duplicates === 1, String(duplicates));
+    const sameTitle = (await getState()).games.filter((game) => game.titleId === "PSTA00021").length;
+    check("five imports of one title leave one entry", sameTitle === 1, String(sameTitle));
     check(
       "only one of five concurrent imports adds it",
       duplicateAttempts.filter((added) => added === 1).length === 1,
@@ -1652,6 +1734,144 @@ async function main(): Promise<void> {
   } finally {
     slow.child.kill();
   }
+
+  /* ---------------- front 1: disk and child-process faults ---------------- */
+  const enginePidFile = join(bootRoot, "engine.pid");
+  const faultCommand = `sh -c 'echo $$ > ${enginePidFile}; sleep 1.5; printf "\\177" > "{pkg}"'`;
+  const faults = await bootApp(
+    "faults",
+    JSON.stringify({ port: 8146, consoleHost: null, engine: "command", enginePaths: { command: faultCommand }, scanDirs: [] }),
+    null,
+    8146,
+    {},
+  );
+  const faultHost = "http://127.0.0.1:8146";
+  const faultPost = (path: string, payload: unknown) =>
+    fetch(`${faultHost}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  const faultState = async () => (await (await fetch(`${faultHost}/api/state`)).json()) as any;
+  const faultGame = async () => (await faultState()).games.find((game: any) => game.titleId === "PSTA00301");
+  const waitFaultTerminal = async (deadlineMs = 12000): Promise<any> => {
+    const deadline = Date.now() + deadlineMs;
+    let game: any = null;
+    while (Date.now() < deadline) {
+      game = await faultGame();
+      if (game && game.state !== "building" && game.state !== "installing") return game;
+      await Bun.sleep(120);
+    }
+    return game;
+  };
+  const namedSentence = (note: unknown) =>
+    typeof note === "string" && note.length > 8 && !/undefined|\[object Object\]| at .*\.ts:\d/.test(note);
+  try {
+    await mkdir(join(bootRoot, "faults", "data", "tmp"), { recursive: true });
+    await faultPost("/api/import", {
+      items: [{ titleId: "PSTA00301", title: "Faulted", path: FIXTURE, kind: "Game folder", size: 0 }],
+    });
+
+    // The packer's own child is killed: exit 137, a named error, no package.
+    // The pid file is removed first: a stale one from an earlier run holds a
+    // reused PID, and killing that would kill an unrelated process (once, the
+    // harness's own server).
+    await rm(enginePidFile, { force: true });
+    await faultPost("/api/build", { titleId: "PSTA00301" });
+    let enginePid = 0;
+    for (let i = 0; i < 100; i++) {
+      try {
+        enginePid = Number((await readFile(enginePidFile, "utf8")).trim());
+        if (enginePid > 0) break;
+      } catch {
+        /* not written yet */
+      }
+      await Bun.sleep(80);
+    }
+    if (enginePid > 0) process.kill(enginePid, "SIGKILL");
+    const afterKill = await waitFaultTerminal();
+    check("a killed packer process ends the job as an error", afterKill?.state === "error", `${afterKill?.state}`);
+    check("the killed packer is named with its exit", namedSentence(afterKill?.note) && /\(13[0-9]\)|killed|signal/i.test(String(afterKill?.note)), String(afterKill?.note).slice(0, 80));
+    check("no package survives a killed packer", !afterKill?.pkgPath && !existsSync(join(bootRoot, "faults", "data", "pkg", "PSTA00301.pkg")));
+
+    // A read-only package folder during the write.
+    const faultPkgDir = join(bootRoot, "faults", "data", "pkg");
+    await chmod(faultPkgDir, 0o555);
+    const startedReadOnly = Date.now();
+    await faultPost("/api/build", { titleId: "PSTA00301" });
+    const readOnlyGame = await waitFaultTerminal();
+    const readOnlyMs = Date.now() - startedReadOnly;
+    await chmod(faultPkgDir, 0o755).catch(() => undefined);
+    check(
+      "a read-only package folder names the write, not the format",
+      readOnlyGame?.state === "error" && /writ|space|permission|folder/i.test(String(readOnlyGame?.note)),
+      `${readOnlyGame?.state} ${String(readOnlyGame?.note).slice(0, 70)}`,
+    );
+    check("that failure is answered inside 2s", readOnlyMs < 2000, `${readOnlyMs}ms`);
+    check("nothing is left installing after it", readOnlyGame?.state !== "installing", `${readOnlyGame?.state}`);
+
+    // The scratch folder removed while the packer is running.
+    await faultPost("/api/build", { titleId: "PSTA00301" });
+    await Bun.sleep(400);
+    await rm(join(bootRoot, "faults", "data", "tmp"), { recursive: true, force: true });
+    const noTmp = await waitFaultTerminal();
+    await mkdir(join(bootRoot, "faults", "data", "tmp"), { recursive: true });
+    check("a scratch folder removed mid-build ends the job", noTmp?.state === "error", `${noTmp?.state}`);
+    check("that failure is a sentence, not a stack", namedSentence(noTmp?.note), String(noTmp?.note).slice(0, 70));
+
+    // A normal request right after each fault.
+    const afterFaults = await fetch(`${faultHost}/api/state`);
+    check("the app still serves after the fault sequence", afterFaults.status === 200, String(afterFaults.status));
+    check("no fault left a job running or queued", !((await faultState()).games as any[]).some((game) => game.state === "building" || game.state === "installing"));
+  } finally {
+    faults.child.kill();
+  }
+
+  // A scratch path that is a file, not a folder: the app must still start and
+  // say what is wrong, rather than dying in ensureDirs.
+  const wrongTmp = join(bootRoot, "wrongtmp");
+  await mkdir(join(wrongTmp, "data"), { recursive: true });
+  await writeFile(join(wrongTmp, "data", "tmp"), "not a folder");
+  const wrongTmpApp = await bootApp(
+    "wrongtmp",
+    JSON.stringify({ port: 8147, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+    null,
+    8147,
+    {},
+  );
+  try {
+    const broken = (await (await fetch("http://127.0.0.1:8147/api/state")).json()) as any;
+    check("a scratch path that is a file still serves /api/state", Array.isArray(broken.games));
+    // The app only needs the scratch folder when it builds, so the failure must
+    // surface there — named, and with nothing left running.
+    await fetch("http://127.0.0.1:8147/api/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: [{ titleId: "PSTA00302", title: "No Scratch", path: FIXTURE, kind: "Game folder", size: 0 }] }),
+    });
+    const scratchStart = Date.now();
+    await fetch("http://127.0.0.1:8147/api/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ titleId: "PSTA00302" }),
+    });
+    let scratchGame: any = null;
+    for (let i = 0; i < 60; i++) {
+      const state = (await (await fetch("http://127.0.0.1:8147/api/state")).json()) as any;
+      scratchGame = state.games.find((game: any) => game.titleId === "PSTA00302");
+      if (scratchGame && scratchGame.state !== "building") break;
+      await Bun.sleep(100);
+    }
+    check(
+      "a scratch path that is a file fails the build with a sentence",
+      scratchGame?.state === "error" && /folder|writ|tmp|scratch/i.test(String(scratchGame?.note)),
+      `${scratchGame?.state} ${String(scratchGame?.note).slice(0, 70)}`,
+    );
+    check("that failure comes back inside 2s", Date.now() - scratchStart < 2000, `${Date.now() - scratchStart}ms`);
+  } finally {
+    wrongTmpApp.child.kill();
+  }
+
 
   // A packer command that fails: the job must end as an error with the code,
   // not sit in "building" and not leave the request open.
