@@ -490,10 +490,10 @@ Verified on this Mac:
   `param.sfo` parsing, build, serving, `Range` resume, deploy, a 60-cycle soak,
   a mixed good/bad dump soak across a restart, the cross-site guard, loopback
   binding, and that a build leaves no temporary files or scratch folder behind
-- `bun run check:app` — 28 checks: the built bundle launched with no Bun or
+- `bun run check:app` — 34 checks: the built bundle launched with no Bun or
   dotnet on PATH, serving API and UI, rejecting cross-origin mutations, building
   a real package, driving the menu handlers (login item install/remove through
-  `launchctl`, console URL, quit), and refusing off-host connections in
+  `launchctl`, launchd starting the app from that item, console URL, quit), and refusing off-host connections in
   loopback mode
 - `bun run check:gate` — 43 checks: the real payload built for this Mac on the
   LAN, preflight passing with all 14 lines, both delivery paths building
@@ -935,9 +935,10 @@ It also drives the menu handlers through the bundle itself:
 unloads and removes it and is harmless when repeated, `--action url` returns the
 address **Open Prospero Vault** uses and that address answers `200`, and
 `--action quit` stops the instance so the port closes and no bundled server
-survives. These call the same functions the menu items call; the menu itself is
-not clicked by the check, so the status item drawing and mouse targets remain a
-human step.
+survives. The check also arms the agent, has `launchd` start the app from it the
+way login would, and quits that instance. These call the same functions the
+menu items call; the menu itself is not clicked by the check, so the status
+item drawing and mouse targets remain a human step.
 
 ### Still hardware-only
 

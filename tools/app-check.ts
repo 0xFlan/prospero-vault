@@ -192,6 +192,23 @@ async function main(): Promise<void> {
     const ps = pid ? Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)]).stdout.toString().trim() : "";
     const pidGone = pid > 0 && (ps === "" || ps.startsWith("Z"));
     check("and no bundled server process survives", pidGone && Bun.spawnSync(["pgrep", "-f", `${BUNDLE}/Contents/Resources/bun app/server.ts`]).exitCode !== 0);
+
+    // The agent was loaded above; now let launchd start it the way login does.
+    const armed = action("login-on");
+    const uid = Bun.spawnSync(["id", "-u"]).stdout.toString().trim();
+    let started = Bun.spawnSync(["launchctl", "kickstart", "-k", `gui/${uid}/com.prospero.vault`]);
+    if (started.exitCode !== 0) started = Bun.spawnSync(["launchctl", "start", "com.prospero.vault"]);
+    check("the login item is armed for launch", armed.status === 0, String(armed.status));
+    check("launchd starts the app from that item", started.exitCode === 0, String(started.exitCode));
+    check("the agent-launched app answers", (await waitFor(`${base}/api/state`, 15000)) === 200);
+    const quitAgent = action("quit");
+    check("Quit stops the agent-launched app", quitAgent.status === 0, quitAgent.out.slice(0, 120));
+    check("and its port closes too", await lanFree(), `:${port}`);
+    check(
+      "no bundled server is left after the login launch",
+      Bun.spawnSync(["pgrep", "-f", `${BUNDLE}/Contents/Resources/bun app/server.ts`]).exitCode !== 0,
+    );
+    action("login-off");
   } finally {
     if (existsSync(agent)) action("login-off");
     app.kill();

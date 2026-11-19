@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var poll: Timer?
     private var signalSources: [DispatchSourceSignal] = []
     private var didStartUI = false
+    private var ownsPid = false
     private let port = Int(ProcessInfo.processInfo.environment["PV_PORT"] ?? "") ?? 8090
 
     var supportDir: URL {
@@ -82,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        try? FileManager.default.removeItem(at: pidFile)
+        if ownsPid { try? FileManager.default.removeItem(at: pidFile) }
         guard let server else { return }
         server.terminate()
         let deadline = Date().addingTimeInterval(2)
@@ -95,6 +96,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func installLoginItem() -> (ok: Bool, detail: String) {
         let executable = Bundle.main.bundlePath + "/Contents/MacOS/ProsperoVault"
+        // A launchd job does not inherit the shell's environment. Only a port
+        // explicitly set in the environment is carried over, which lets a
+        // check run the real agent on a spare port without touching the app's
+        // normal 8090.
+        var environment = ""
+        if let port = ProcessInfo.processInfo.environment["PV_PORT"] {
+            environment = "<key>EnvironmentVariables</key><dict><key>PV_PORT</key><string>\(port)</string></dict>"
+        }
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -103,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           <key>Label</key><string>com.prospero.vault</string>
           <key>ProgramArguments</key>
           <array><string>\(executable)</string><string>--login</string></array>
+          \(environment)
           <key>RunAtLoad</key><true/>
           <key>LimitLoadToSessionType</key><string>Aqua</string>
         </dict>
@@ -272,6 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func writePid() {
         try? "\(ProcessInfo.processInfo.processIdentifier)".write(to: pidFile, atomically: true, encoding: .utf8)
+        ownsPid = true
     }
 
     @objc private func openUI() {
