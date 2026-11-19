@@ -978,11 +978,21 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const titleId = routeId(pathname, "/api/icon/");
     const game = titleId ? findGame(titleId) : undefined;
     if (!game?.sourcePath) return bad("That title has no icon.", 404);
-    const icon = join(game.sourcePath, "sce_sys", "icon0.png");
-    if (!isInside(icon, game.sourcePath)) return bad("That icon is outside the title's folder.", 403);
-    const file = Bun.file(icon);
-    if (!(await file.exists())) return bad("That title has no icon.", 404);
-    return new Response(file, { headers: { "cache-control": "max-age=3600" } });
+    // The scan marks hasIcon when icon0.png is in sce_sys/ OR at the dump root
+    // (core.ts), so the route must look in both — otherwise a root-icon title
+    // reports an icon, this 404s, and the tile falls back to its placeholder.
+    const candidates = [
+      join(game.sourcePath, "sce_sys", "icon0.png"),
+      join(game.sourcePath, "icon0.png"),
+    ];
+    for (const icon of candidates) {
+      if (!isInside(icon, game.sourcePath)) continue;
+      const file = Bun.file(icon);
+      if (await file.exists()) {
+        return new Response(file, { headers: { "cache-control": "max-age=3600" } });
+      }
+    }
+    return bad("That title has no icon.", 404);
   }
 
   // Everything under /api is answered in JSON. Falling through to the static
