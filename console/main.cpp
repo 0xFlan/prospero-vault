@@ -2065,6 +2065,16 @@ bool remove_tree(const char* path) {
  * registered it, 3 when the tile was deliberately left off, 0 on a host build,
  * and -1 when nothing could be written.
  */
+/** A development FSELF starts with 0x1D3D154F; the console shell eboot does not. */
+bool is_native_eboot(const char* path) {
+  unsigned char magic[4] = {0};
+  const int file = ::open(path, O_RDONLY);
+  if (file < 0) return false;
+  const ssize_t got = ::read(file, magic, sizeof magic);
+  ::close(file);
+  return got == 4 && magic[0] == 0x4f && magic[1] == 0x15 && magic[2] == 0x3d && magic[3] == 0x1d;
+}
+
 int ensure_home_app(bool force, char* message, std::size_t cap) {
 #if PV_HAVE_SONY
   if (!force && ::access(kHomeAppOptOut, F_OK) == 0) {
@@ -2095,6 +2105,19 @@ int ensure_home_app(bool force, char* message, std::size_t cap) {
   std::snprintf(icon_path, sizeof icon_path, "%s/icon0.png", sce_sys);
   char eboot_path[384];
   std::snprintf(eboot_path, sizeof eboot_path, "%s/eboot.bin", kHomeAppDir);
+
+  // The native title writes this folder from its installer. Rewriting the
+  // web-app metadata here would point the tile at a browser page and drop the
+  // native app's own manifest, so an installed native eboot is left alone.
+  if (is_native_eboot(eboot_path)) {
+    pthread_mutex_lock(&g_lock);
+    g_home_app = kHomeAppRegistered;
+    pthread_mutex_unlock(&g_lock);
+    std::snprintf(message, cap,
+                  "The native Prospero Vault title is installed, so the web-app tile fallback was left "
+                  "alone. Launch Prospero Vault from the app row.");
+    return 1;
+  }
 
   // The console's own shell metadata: what the home screen reads to draw the
   // tile, and the address the web-app shell opens when it is pressed. The
@@ -2220,6 +2243,17 @@ int ensure_home_app(bool force, char* message, std::size_t cap) {
  */
 int remove_home_app(char* message, std::size_t cap) {
 #if PV_HAVE_SONY
+  char native_eboot[384];
+  std::snprintf(native_eboot, sizeof native_eboot, "%s/eboot.bin", kHomeAppDir);
+  if (is_native_eboot(native_eboot)) {
+    std::snprintf(message, cap,
+                  "The native Prospero Vault title is installed. Removing this folder would delete the "
+                  "app itself, so it was left in place. Close the app and remove %s with a file manager "
+                  "only if you mean to uninstall it.",
+                  kHomeAppDir);
+    return 2;
+  }
+
   const bool gone = remove_tree(kHomeAppDir) || ::access(kHomeAppDir, F_OK) != 0;
   // Remember the decision only once the tile really went, or the next payload
   // start would leave a half-removed tile that never comes back.

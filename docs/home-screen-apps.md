@@ -1,10 +1,15 @@
 # How the stores get a tile on the home screen
 
 The question was how ProsperoStore, Pegasus DL+, Playden and the rest have real
-apps in the PS5's app row while Prospero Vault is only a page in the browser.
-The answer is the same for every one of them, and it is smaller than expected:
-**none of them ships an FPKG, and none of them is signed.** They are folders on
-the console that a payload called **ShadowMountPlus** registers with the shell.
+apps in the PS5's app row. The answer is the same for every one of them, and it
+is smaller than expected: **none of them ships an FPKG, and none of them is
+signed.** They are folders on the console that a payload called
+**ShadowMountPlus** registers with the shell.
+
+Prospero Vault now ships one of these folders too. `console-native/` builds
+`PVLT00001` as a native title with its own VideoOut interface; the payload is the
+backend, not the window. The rest of this page records the mechanism, the route
+that was taken, and the fallback that remains.
 
 ## What each project actually ships
 
@@ -17,7 +22,7 @@ the console that a payload called **ShadowMountPlus** registers with the shell.
 | ProsperoWeb (`PRWB00001`) | `PRWB00001.zip` | same | WebKit relinked as a title |
 | ps5-homebrew-starter / boilerplate | `dist/<TITLE_ID>.zip` | same | native C++20 skeleton |
 | Sonic Loader (`PSPS69691`) | a real `.pkg` | Sony's installer, so no payload needed | the console's browser |
-| Prospero Vault 0.11 | `prospero-vault.elf` payload writes the folder itself | same, with `deeplinkUri` + the web-app shell | HTML served on `:8097` |
+| Prospero Vault (current) | `console-native/dist/install.elf` writes the folder | ShadowMountPlus scan of `/data/homebrew` | native C++ (VideoOut), payload backend on `:8097` |
 
 ## The mechanism, exactly
 
@@ -79,6 +84,42 @@ fake-signs a homebrew module and builds an installable debug fPKG with the
 license-free mount path. **Neither removes the hard part below**, because both
 still want a native `eboot.bin` as input.
 
+## The Vault title, in this repository
+
+`PVLT00001` is a native title now:
+
+```
+/data/homebrew/PVLT00001/
+  eboot.bin              development FSELF (magic 0x1D3D154F) around a native ELF
+                         with e_type=0xFE10 and the process-parameter block
+  sce_module/libc.prx    generated clean-room runtime, 1,284,674 bytes,
+                         SHA-256 e6ff45d1...ba0036
+  sce_sys/param.json     titleId PVLT00001, game category
+  sce_sys/icon0.png      512x512
+  assets/build.txt       which build is on the console
+```
+
+`console-native/build.sh` compiles the app with the public payload SDK's Clang
+target, links it with the native-app CRT and `ps5-pie.ld` (process parameters,
+RELRO anchored to `.data.rel.ro`, every `PT_LOAD` congruent modulo `0x4000`),
+converts it with the `ps5-native-tool` FSELF writer, and packages the folder.
+`dist/install.elf` is a one-shot `elfldr` payload: it stops a running Vault,
+writes all five files with `0777`, and leaves the tile ready.
+
+The earlier failure is understood. A probe built from the payload ELF without
+the native layout died with `0x80AA001A`
+(`SCE_SYSCORE_ERROR_ABORT_WHEN_CREATING_NEW_PROCESS`). That code is also what a
+mismatched `PT_LOAD` produces: the file offset and virtual address must agree
+modulo `0x4000`, and RELRO must be anchored to the first section of the region
+(`.data.rel.ro`), not to the GOT. With that fixed and the runtime companion in
+place, ShadowMount+ registers the folder and LNC launches the title.
+
+What was verified on **13.20**: the installer wrote the folder, ShadowMount+
+reported `status: 0`, LNC held `PVLT00001` as the running big app, and the
+in-title status endpoint on `:8096` reported an increasing frame count with 21
+titles from the backend. The screen layout and controller mapping were not
+captured; that is the remaining visual check.
+
 ## The hard part is not the tile
 
 `eboot.bin` has to be a **native PS5 application**, and a payload ELF is not
@@ -108,24 +149,30 @@ scene actually uses them:
    real, but the UI is still the console's browser in a bare window, and the
    build needs `prospero-pub-cmd` plus a debug console.
 
-For Prospero Vault, route 1 is the one that produces a genuine app-row tile with
-the console UI inside it. Route 3 is the only one that keeps the HTML as-is, and
-it does not look like an app. Route 2 is the most expensive and, on the evidence
-available, has not been shown to work yet.
+For Prospero Vault, route 1 is the one that produced a genuine app-row tile with
+the interface inside it (`console-native/`). Route 3 keeps the HTML as-is but
+still looks like a browser window. Route 2 is the most expensive and, on the
+evidence available, has not been shown to work.
 
-**Build host.** The native toolchain (`ps5-native-app-boilerplate`, Clang 18 +
-lld 18 + make + python3) is Linux/WSL-only; macOS is not a supported host and
-this machine has no Docker. The tile would be built on a Linux or WSL box, then
-deployed to `/data/homebrew/PVLT00001/` over FTP. The payload keeps working
-unchanged in the meantime.
+**Build host.** Upstream describes the native toolchain
+(`ps5-native-app-boilerplate`, Clang + lld + make + python3) as Linux/WSL-only.
+The two host programs and the deterministic runtime emitter are portable C++20,
+so this repository's title also builds on macOS with Homebrew LLVM and the
+payload SDK already used for the payload. The toolchain is not vendored (it is
+GPL-3.0); `console-native/tools/bootstrap-toolchain.sh` reconstructs it and
+checks the runtime against its pinned SHA-256.
 
 ## What this repository does now
 
-Route 3, without the PKG: the payload writes the title folder itself at startup
-and from Console → **Home screen app**, so there is no packer, no signing step
-and no second tool to run. That is only possible because a *folder* registered by
-ShadowMountPlus needs no signing — the Sonic Loader PKG exists only to ship the
-same thing through Sony's installer, which does need one.
+The native title is the primary path. The payload still contains the older
+web-app shell fallback, but it now refuses to overwrite a native `eboot.bin` or
+delete the native folder: on a native install, `POST /api/home-app` returns the
+"left alone" message and `POST /api/home-app/remove` refuses. The fallback is
+for consoles that have not staged `console-native/dist/install.elf`.
+
+That fallback works because a *folder* registered by ShadowMountPlus needs no
+signing — the Sonic Loader PKG exists only to ship the same folder through Sony's
+installer, which does need one.
 
 ```
 /data/homebrew/PVLT00001/
@@ -134,11 +181,10 @@ same thing through Sony's installer, which does need one.
   sce_sys/icon0.png      512x512, drawn by console/tools/icon.py and embedded
 ```
 
-- **Why the shell eboot.** A payload ELF is not a title, so the folder cannot
-  carry the app's own binary. The console's web-app shell *is* a title, and it
-  opens the address in `deeplinkUri` — the same pairing the Homebrew Launcher and
-  Sonic Loader use. The result is the interface full screen, with no browser
-  chrome, which a shortcut to the browser could not give.
+- **Why the shell eboot (fallback only).** A payload ELF is not a title, so the
+  fallback folder carries the console's web-app shell, which opens the address
+  in `deeplinkUri` — the same pairing the Homebrew Launcher and Sonic Loader use.
+  The native title replaces this with its own `eboot.bin`.
 - **`deeplinkUri` is the load-bearing field.** Without it the shell has nothing
   to open and the tile does nothing. It points at `127.0.0.1` because the tile is
   only meaningful on the console itself.

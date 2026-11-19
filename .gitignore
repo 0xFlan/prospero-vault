@@ -7,3 +7,6 @@ packer/bin/
 packer/obj/
 packer/.deps/
 build/
+console-native/dist/
+console-native/installer/PVLT00001.tar
+console-native/installer/title_tar.S

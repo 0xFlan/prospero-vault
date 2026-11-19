@@ -936,13 +936,13 @@
           }),
           row({
             key: "console:home-app",
-            title: "Home screen app",
+            title: "Web tile fallback",
             desc:
               homeAppState() === "on"
-                ? "Registered with ShadowMountPlus. Its tile opens this interface full screen."
+                ? "ShadowMountPlus holds PVLT00001. A native title is left untouched; this only writes the shell fallback."
                 : homeAppState() === "pending"
                   ? "Written to /data/homebrew, but ShadowMountPlus has not registered it."
-                  : "Add this app to the home screen's app row.",
+                  : "Install the native title with console-native/dist/install.elf. This button is the browser fallback.",
             value: homeAppState() === "on" ? "Installed" : homeAppState() === "pending" ? "Pending" : "Add",
             valueClass: homeAppState() === "on" ? "ok" : homeAppState() === "pending" ? "warn" : "",
             glyph: '<svg viewBox="0 0 24 24"><rect x="3.2" y="4.4" width="17.6" height="15.2" rx="2"/><path d="M7.4 9.6h9.2M7.4 13.2h6"/></svg>',
@@ -1429,9 +1429,9 @@
         );
       }
 
-      // The app installs itself: a tile in the app row, opening this interface
-      // full screen. Nothing is downloaded and nothing is signed — the payload
-      // writes the folder the console's home screen reads.
+      // Fallback only: the tile opens this browser interface full screen. If a
+      // native eboot is already in the folder, the payload leaves it and its
+      // manifest alone and reports that instead of overwriting them.
       function installHomeApp() {
         toast("Adding Prospero Vault to the home screen…");
         api("POST", "/api/home-app", {})

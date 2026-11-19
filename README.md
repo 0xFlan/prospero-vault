@@ -1,13 +1,16 @@
 # Prospero Vault
 
-Prospero Vault turns a PS5 game dump into a debug FPKG and installs it with the
-console's own installer. The interface runs on the PS5, so you pick a game on the
-console and play it from the home screen. A small Mac app does the packing
-today; packing on the console itself needs a native package engine and is not in
-this build. The exact blocker is recorded under "Limits" rather than hidden.
+Prospero Vault is a native PS5 title. It launches from the home row, draws its
+interface with VideoOut/GPU presentation, and reads the DualSense directly. A
+payload loaded with `elfldr` is the title's backend: it scans the library, hands
+installs to the console, converts through the Mac, and starts titles. The Mac
+app still builds the packages; packing on the console itself needs a native
+package engine and is not in this build. The exact blocker is recorded under
+"Limits" rather than hidden.
 
-This README covers both halves: the Mac app, the console payload, and the tests
-that show what works.
+The native title lives in `console-native/`. The payload and the browser page it
+serves remain as the backend API and as the fallback interface. This README
+covers all three: the title, the Mac app, and the tests that show what works.
 
 **Tested on:** PS5 firmware **13.20**, **ShadowMount+ 1.7beta12**, `elfldr` on
 port 9021. **Firmware 14.xx cannot run this or any other payload**: there is no
@@ -19,10 +22,40 @@ request and then rejects the package with `0x80BD0005`; this is a kernel-patch
 limit, not a Vault bug. Mount a dump or image with ShadowMount+ on 13.20, or use
 a console on 11.60 or older for install-and-launch.
 
-## The screens
+## The console title
 
-These images are renders of the console interface from the Mac preview. They are
-not console screenshots; the hardware run is described below.
+`console-native/` builds `PVLT00001` as a development FSELF: a native PS5 ELF
+(`e_type=0xFE10`) with process parameters, the generated clean-room
+`sce_module/libc.prx`, and a controller-first interface drawn on VideoOut.
+ShadowMount+ registers the folder, so the tile is a normal home-row app, not a
+page in the browser and not a renamed payload.
+
+```bash
+./console-native/build.sh
+nc -w 30 192.168.4.100 9021 < console-native/dist/install.elf
+```
+
+The installer stops a running Vault, writes the whole folder with the `0777`
+modes ShadowMount+ needs, and leaves the tile ready to launch. It is one ELF
+over `elfldr`; there is no FTP step. The title needs the backend payload on
+`127.0.0.1:8097` (it falls back to `8098`), and reports its own state on 8096:
+
+```bash
+curl http://192.168.4.100:8096/
+# {"ok":true,"app":"prospero-vault","native":true,"frames":470,"games":21,...}
+```
+
+The native title was launched on the tested **13.20** console. Its frame counter
+advanced while it read 21 titles from the backend. The screen itself and the
+controller buttons were not captured or visually checked in that run; treat the
+look and the button mapping as needing your eyes on the console.
+
+## The screens (browser fallback)
+
+These images show the browser interface served by the payload. It is the
+fallback and the backend's own page, not the native title. They are Mac
+previews, not console screenshots. The native title draws a controller-first
+list on VideoOut and is not pictured here because no console capture was taken.
 
 ![Library on the console](docs/screens/view-library.png)
 
@@ -140,7 +173,7 @@ serves the browser UI on this Mac only.
 The menu is a SwiftUI view shared by the status item and the screenshot tool.
 Regenerate the image with `bun run capture:menu`.
 
-## Put the payload on the console
+## Put the backend payload on the console
 
 ```bash
 make -C console
@@ -153,11 +186,10 @@ The build writes `console/build/prospero-vault.elf`. To load it:
 3. Upload `console/build/prospero-vault.elf`.
 4. Load `/data/prospero-vault/prospero-vault.elf` with `elfldr` on port 9021.
 
-Copying the file alone does not start it. The ELF contains the server and the
-whole interface, so there is nothing else to upload.
-
-Open the interface on the console at `http://127.0.0.1:8097`, or from another
-device at `http://192.168.4.100:8097`.
+Copying the file alone does not start it. The payload is the backend; the native
+title is installed separately with the one-shot `install.elf` above. If you
+cannot use the native title, the payload still serves the browser interface at
+`http://127.0.0.1:8097`, or at `http://192.168.4.100:8097` from another device.
 
 ## Convert a dump
 
@@ -250,13 +282,16 @@ bun run test
 
 The payload compiles for the PS5 with no warnings. The console build loads on a
 **13.20** console with `elfldr` and serves the library on 8097; that hardware run
-has been done. These paths are still unproven on hardware:
+has been done. The native title was staged with `dist/install.elf`, launched by
+LNC as `PVLT00001`, and answered on 8096 with an increasing frame count and 21
+titles. These paths are still unproven on hardware:
 
 - install a package built here;
 - start it from this app and from the home screen;
-- press the Home screen app tile;
 - open a DLC package;
-- mount an `.exfat` dump.
+- mount an `.exfat` dump;
+- the native title's on-screen layout and controller mapping (not visually
+  checked; the frame loop and backend feed were checked).
 
 Until those pass on a console, treat them as unproven. The build and transfer
 paths are tested against the real payload compiled for this Mac, not emulated.
@@ -321,8 +356,9 @@ network.
 
 ```bash
 bun run dev        # Mac app on http://localhost:8090
-bun run preview    # console UI on http://localhost:8094
-make -C console    # PS5 payload
+bun run preview    # browser fallback UI on http://localhost:8094
+make -C console    # PS5 backend payload
+./console-native/build.sh  # native title + installer
 bun run capture:menu  # refresh docs/screens/status-menu.png
 ```
 
@@ -334,7 +370,8 @@ The main folders:
 
 ```
 console/main.cpp        payload: scan, HTTP, convert, install, play
-console/ui/index.html   the console interface
+console/ui/index.html   the browser fallback interface
+console-native/         native VideoOut title, installer, build pipeline
 app/                    the Mac app and packers
 public/                 the Mac app's page
 tools/                  checks and the app builder
@@ -357,8 +394,16 @@ docs/screens/           screenshots used here
   missing, Vault says so instead of pretending the package was handed over.
 - An on-console packer would not make this console play the result: FPKG install
   itself is the ceiling on 13.20. Mounting is the supported path there.
-- The home-screen tile depends on the console's web-app shell. The path can
-  differ by firmware; `"shellEboot"` in `config.json` points at another one.
+- **The native title is a development FSELF, not a retail PKG.** It is built
+  with the public native-app toolchain (`tooling/native`, `ps5-pie.ld`, an
+  FSELF writer) and the generated clean-room `libc.prx`. It was verified on
+  **13.20** only; other firmware and loader combinations are unverified, and the
+  toolchain upstream targets Linux/WSL even though this Mac builds it.
+- **The title needs the payload for everything except drawing and input.** If
+  8097/8098 is silent it shows `BACKEND OFFLINE` instead of an empty library.
+- The shell web tile remains as a fallback, but the payload now refuses to
+  overwrite a native eboot or delete the native folder. `POST /api/home-app` on
+  a native install returns the "left alone" message; `remove` refuses too.
 - The payload cannot change a game's frame rate or resolution.
 - Patches (`gp`), firmware images and retail packages are not supported.
 - Signing and notarization need your Developer ID. The app check covers the

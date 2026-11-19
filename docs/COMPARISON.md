@@ -20,11 +20,11 @@ Both are legitimate answers. The difference is what you pay and what you get.
 | Building a package | Yes — fpkg-cli, orbis-pub-cmd, LibProsperoPkg, or a custom command, with AC/DLC packing | No — it mounts what already exists; sparse-extent PKGs must be repacked (`--kraken stored`) |
 | A dump that lives only on the console | Pulled to the Mac with a resumable, byte-verified transfer, then built | Mounted directly, no copy |
 | Scanning | Paths you choose, plus what the console reports from `/data`, `/user/data` and USB | Fixed roots, zero config: `/data/homebrew`, `/data/etaHEN/games`, drive roots, USB |
-| Interface | Console-native page served by the payload, plus a desktop app for the library | Web UI on the console |
+| Interface | Native PS5 title drawn with VideoOut and the DualSense, plus a desktop app for the library | Web UI on the console |
 | DLC and PlayGo | Packed by `acpack` when you build | Bundled `dlc_emu` and `pgo_stub`, added automatically |
 | Saves and trophies | Untouched — the installed title uses the console's own modules | v0.3.0 stopped shadowing `libSceSaveData` after saves went missing (#64, #68) |
 | Failure reporting | Every failure carries a sentence and a name; simulated builds are labelled and refused by the console | Log lines and a title that does not appear |
-| Requirements | kstuff + elfldr, a Mac with a packer | kstuff, ShadowMount+ stopped |
+| Requirements | kstuff + elfldr, the native-app toolchain to build the title, a Mac with a packer | kstuff, ShadowMount+ stopped |
 | Console firmware | Payload runs on 13.20 (tested); 14.xx has no public exploit | Same exploit ceiling applies |
 | FPKG install/launch | Public kstuff ceiling is 11.60; 13.20 rejects with `0x80BD0005` | Mounts without installing, so it is the working route above 11.60 |
 
@@ -57,8 +57,9 @@ public kstuff installs and launches debug packages only through **11.60**.
 * **Failures you can read.** A build that produced a placeholder says so and the
   console refuses to install it. A save that could not be written says so on the
   title and in a pill. Nothing is reported as progress after it stopped.
-* **The interface matches the console** — icon row, focus ring, D-pad — instead
-  of a web page styled like a dashboard.
+* **The interface is a real home-row title** — VideoOut, frame loop, DualSense
+  input — instead of a web page styled like a dashboard. The payload is its
+  backend, not its window.
 
 ## What we are closing next
 
