@@ -258,7 +258,7 @@ function renderPills() {
 function tile(g) {
   const { h, h2 } = hue(g.titleId);
   const cover = g.hasIcon
-    ? `<img src="/api/icon/${encodeURIComponent(g.titleId)}" alt="" onerror="this.remove()">`
+    ? `<span class="initials">${esc(initials(g.title))}</span><img src="/api/icon/${encodeURIComponent(g.titleId)}" alt="" onerror="this.remove()">`
     : `<span class="initials">${esc(initials(g.title))}</span>`;
   const chip =
     g.simulated && g.state === "built"
@@ -509,7 +509,7 @@ function paintDrawer() {
   const { h, h2 } = hue(g.titleId);
   const progress = S.progress[g.titleId];
   const cover = g.hasIcon
-    ? `<img src="/api/icon/${encodeURIComponent(g.titleId)}" alt="" onerror="this.remove()">`
+    ? `<span class="initials" style="font-size:2.6rem">${esc(initials(g.title))}</span><img src="/api/icon/${encodeURIComponent(g.titleId)}" alt="" onerror="this.remove()">`
     : `<span class="initials" style="font-size:2.6rem">${esc(initials(g.title))}</span>`;
 
   const busy = g.state === "building" || g.state === "installing";

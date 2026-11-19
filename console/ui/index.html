@@ -32,7 +32,7 @@
         overflow: hidden;
         background: var(--bg);
         color: var(--text);
-        font-family: "SST", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+        font-family: "Sony SST", "SST", "SST Light", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
         -webkit-font-smoothing: antialiased;
         font-size: 15px;
         line-height: 1.35;
@@ -48,8 +48,8 @@
         right: -10%;
         height: 90%;
         pointer-events: none;
-        background: radial-gradient(60% 60% at 22% 20%, rgba(84, 120, 190, 0.16), rgba(16, 16, 19, 0) 70%),
-                    radial-gradient(50% 50% at 88% 0%, rgba(120, 86, 190, 0.1), rgba(16, 16, 19, 0) 70%);
+        background: radial-gradient(58% 48% at 50% 0%, rgba(243, 244, 248, 0.07), rgba(16, 16, 19, 0) 62%),
+                    radial-gradient(120% 80% at 50% -16%, rgba(150, 162, 190, 0.05), rgba(16, 16, 19, 0) 60%);
       }
       /* The console's ambient field: near-black with a slow drift. Two
          composited gradient layers, no blur filters — a filter is expensive on
@@ -103,19 +103,16 @@
       }
       .brand { display: flex; align-items: center; margin-right: 18px; padding-bottom: 25px; }
       .brand .mark {
-        width: 26px;
-        height: 26px;
-        border-radius: 4px;
+        width: 30px;
+        height: 30px;
         background: none;
-        border: 1px solid rgba(255, 255, 255, 0.22);
+        border: 0;
         color: var(--muted);
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 9.5px;
-        font-weight: 600;
-        letter-spacing: 0.04em;
       }
+      .brand .mark svg { width: 100%; height: 100%; stroke: currentColor; fill: none; }
       .nav { display: flex; align-items: flex-end; }
       .nav .item {
         display: flex;
@@ -155,7 +152,7 @@
       .topbar { display: flex; align-items: flex-end; justify-content: space-between; padding: 0 2px 14px; }
       /* PS5 display type is light, not bold: the weight is what reads as system UI. */
       .topbar h1 { margin: 0; font-size: 30px; font-weight: 300; letter-spacing: -0.005em; }
-      .topbar .crumbs { display: flex; align-items: center; font-size: 10.5px; color: var(--dim); letter-spacing: 0.13em; text-transform: uppercase; margin-bottom: 7px; }
+      .topbar .crumbs { display: none; }
       .clock { font-size: 13px; color: var(--muted); letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
       /* Side padding leaves room for the focus ring, which was being clipped
          against the edge on the first and last tile of a row. */
@@ -293,7 +290,7 @@
       .row[disabled]:hover { background: var(--row); }
       .row.focused .desc, .row.focused .value { color: #4a4a52; }
       .row.focused .glyph, .row.focused .chev { color: #2a2a30; border-color: #2a2a30; }
-      .section { margin: 22px 0 10px; font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+      .section { margin: 26px 0 10px; font-size: 12px; letter-spacing: 0.01em; text-transform: none; color: var(--dim); font-weight: 300; }
       .section:first-child { margin-top: 2px; }
 
       .empty { padding: 60px 10px; text-align: center; color: var(--muted); }
@@ -442,7 +439,7 @@
         <div class="app">
       <header class="sysbar">
         <div class="brand">
-          <span class="mark" aria-hidden="true">PV</span>
+          <span class="mark" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M24 6 L29 15 L19 15 Z" /><circle cx="38" cy="24" r="5" /><rect x="5" y="19" width="10" height="10" rx="1.5" /><path d="M20.5 34 L27.5 41 M27.5 34 L20.5 41" /></svg></span>
         </div>
 
         <nav class="nav" id="nav">
