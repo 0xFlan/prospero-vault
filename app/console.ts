@@ -95,7 +95,10 @@ export async function install(
   payload: { titleId: string; /** how the console should reach this Mac */ mac?: string },
 ): Promise<InstallResult> {
   if (!host) {
-    await new Promise((r) => setTimeout(r, 900));
+    // Simulated install often enough to be visible; a soak that runs hundreds
+    // of cycles sets this to zero so it measures accumulation, not the fake wait.
+    const simulatedMs = Number(process.env.PV_INSTALL_DELAY_MS ?? 900);
+    if (simulatedMs > 0) await new Promise((r) => setTimeout(r, simulatedMs));
     return {
       ok: true,
       detail: "Simulated install — no console configured",

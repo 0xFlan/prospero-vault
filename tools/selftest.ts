@@ -1735,6 +1735,262 @@ async function main(): Promise<void> {
     slow.child.kill();
   }
 
+  /* ---------------- front 1: damaged state files ---------------- */
+  const corruptCases: Array<{
+    name: string;
+    prep?: (dir: string) => Promise<void>;
+    libraryText?: string;
+    expectGames: number;
+    expectProblem: boolean;
+  }> = [
+    {
+      name: "a library truncated mid-record",
+      libraryText: '[{"titleId":"PSTA00031","title":"Half","sourceKind":"Game folder","state":"built"',
+      expectGames: 0,
+      expectProblem: true,
+    },
+    { name: "a library of garbage bytes", libraryText: "\u0000\u0001\u0002 not json at all \ufffd", expectGames: 0, expectProblem: true },
+    { name: "an empty library file", libraryText: "", expectGames: 0, expectProblem: true },
+    {
+      name: "a directory where the library should be",
+      prep: (dir) => mkdir(join(dir, "data", "library.json"), { recursive: true }).then(() => undefined),
+      expectGames: 0,
+      expectProblem: true,
+    },
+    {
+      name: "an unreadable library file",
+      prep: async (dir) => {
+        await writeFile(join(dir, "data", "library.json"), JSON.stringify([{ titleId: "PSTA00032", title: "Hidden" }]));
+        await chmod(join(dir, "data", "library.json"), 0o000);
+      },
+      expectGames: 0,
+      expectProblem: true,
+    },
+    {
+      name: "an orphaned .tmp from an interrupted write",
+      prep: async (dir) => {
+        await writeFile(join(dir, "data", "library.json.abc123.tmp"), '[{"titleId":"PSTA00033","title":"Tmp"}');
+      },
+      expectGames: 0,
+      // Nothing to explain: there is no library yet, and the temp is ignored.
+      expectProblem: false,
+    },
+  ];
+  for (const [index, entry] of corruptCases.entries()) {
+    let app: any = null;
+    const started = Date.now();
+    try {
+      app = await bootApp(
+        `corrupt${index}`,
+        JSON.stringify({ port: 8150 + index, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+        null,
+        8150 + index,
+        { beforeSpawn: entry.prep, libraryText: entry.libraryText },
+      );
+      const bootMs = Date.now() - started;
+      const state = app.state as any;
+      check(
+        `${entry.name}: the app serves a clean list`,
+        Array.isArray(state.games) && state.games.length === entry.expectGames,
+        `${state.games?.length} games`,
+      );
+      const explained = entry.expectProblem ? Boolean(state.libraryProblem) : state.libraryProblem === null;
+      check(
+        `${entry.name}: the damage is reported by name`,
+        explained && !/undefined|\[object Object\]| at .*\.ts:\d/.test(String(state.libraryProblem)),
+        String(state.libraryProblem).slice(0, 70),
+      );
+      check(`${entry.name}: recovery is inside 3s`, bootMs < 3000, `${bootMs}ms`);
+      const afterBoot = await fetch(`http://127.0.0.1:${8150 + index}/api/state`);
+      check(`${entry.name}: a normal request works afterwards`, afterBoot.status === 200, String(afterBoot.status));
+    } finally {
+      app?.child.kill();
+    }
+  }
+
+  // A pid file the app did not write must be ignored, never adopted: nothing in
+  // the app opens one, and a stale one must not get a signal.
+  const pidDir = join(bootRoot, "pidfile");
+  const pidApp = await bootApp(
+    "pidfile",
+    JSON.stringify({ port: 8160, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+    null,
+    8160,
+    {
+      beforeSpawn: async (dir) => {
+        await writeFile(join(dir, "data", "engine.pid"), String(process.pid));
+      },
+    },
+  );
+  try {
+    const pidState = pidApp.state as any;
+    check("a stale pid file does not change the library", Array.isArray(pidState.games) && pidState.games.length === 0);
+    check("a stale pid file is left untouched, not adopted", (await readFile(join(pidDir, "data", "engine.pid"), "utf8")).trim() === String(process.pid));
+    let alive = true;
+    try {
+      process.kill(process.pid, 0);
+    } catch {
+      alive = false;
+    }
+    check("the process named by that file was never signalled", alive);
+  } finally {
+    pidApp.child.kill();
+  }
+
+  // A kill in the middle of a state write: the next boot must see the old
+  // record or the new one, never a half file.
+  const atomicDir = join(bootRoot, "atomic");
+  const atomic3 = await bootApp(
+    "atomic",
+    JSON.stringify({ port: 8163, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+    null,
+    8163,
+    { env: { PV_SAVE_DELAY_MS: "1400", PV_SAVE_DELAY_MARKER: "PSTA00041" } },
+  );
+  try {
+    const importStart = Date.now();
+    // A first, normal save, so an old record exists to be preserved.
+    await fetch("http://127.0.0.1:8163/api/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: [{ titleId: "PSTA00040", title: "Before", path: FIXTURE, kind: "Game folder", size: 0 }] }),
+    });
+    await Bun.sleep(200);
+    void fetch("http://127.0.0.1:8163/api/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: [{ titleId: "PSTA00041", title: "Atomic", path: FIXTURE, kind: "Game folder", size: 0 }] }),
+    }).catch(() => null);
+    await Bun.sleep(300);
+    // The save is held just before its rename, so this kill lands mid-write.
+    atomic3.child.kill("SIGKILL");
+    await Bun.sleep(200);
+    let survived: any = null;
+    let readable = true;
+    try {
+      survived = JSON.parse(await readFile(join(atomicDir, "data", "library.json"), "utf8"));
+    } catch {
+      readable = false;
+    }
+    check(
+      "a write killed mid-flight leaves a whole old record",
+      readable &&
+        Array.isArray(survived) &&
+        survived.some((row: any) => row.titleId === "PSTA00040") &&
+        !survived.some((row: any) => row.titleId === "PSTA00041"),
+      `${Array.isArray(survived) ? survived.length : "not an array"} rows, ${Date.now() - importStart}ms`,
+    );
+    const rebooted = await bootApp(
+      "atomic",
+      JSON.stringify({ port: 8164, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+      null,
+      8164,
+      {},
+    );
+    try {
+      check(
+        "the boot after that kill reads the library cleanly",
+        Array.isArray((rebooted.state as any).games),
+        `${(rebooted.state as any).games?.length} games`,
+      );
+    } finally {
+      rebooted.child.kill();
+    }
+  } finally {
+    atomic3.child.kill();
+  }
+
+  /* ---------------- front 2: a long soak ---------------- */
+  const soak = await bootApp(
+    "soak",
+    JSON.stringify({ port: 8170, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+    null,
+    8170,
+    // No simulated hold: the soak is about accumulation across 320 operations,
+    // not about waiting on the fake engine.
+    { env: { PV_MOCK_HOLD_MS: "0", PV_INSTALL_DELAY_MS: "0" } },
+  );
+  const soakHost = "http://127.0.0.1:8170";
+  try {
+    const pid = soak.child.pid;
+    const rssKb = () =>
+      Number(
+        Bun.spawnSync(["ps", "-o", "rss=", "-p", String(pid)]).stdout.toString().trim() || 0,
+      );
+    const fdCount = () =>
+      Number(
+        Bun.spawnSync(["bash", "-lc", `lsof -p ${pid} 2>/dev/null | wc -l`]).stdout.toString().trim() || 0,
+      );
+    const latency = async () => {
+      const started = Date.now();
+      for (let i = 0; i < 10; i++) await fetch(`${soakHost}/api/state`).then((res) => res.arrayBuffer());
+      return (Date.now() - started) / 10;
+    };
+    const soakPost = (path: string, payload: unknown) =>
+      fetch(`${soakHost}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    const soakGame = async (id: string) =>
+      ((await (await fetch(`${soakHost}/api/state`)).json()) as any).games.find((game: any) => game.titleId === id);
+    const soakRss0 = rssKb();
+    const soakFd0 = fdCount();
+    const soakLat0 = await latency();
+    // 60 cycles is 240 operations; the simulated engine still sleeps through a
+    // build, so this keeps the run inside its five-minute budget.
+    const cycles = 60;
+    let terminalCycles = 0;
+    const soakStart = Date.now();
+    for (let cycle = 0; cycle < cycles; cycle++) {
+      const id = `PSOAK${String(cycle).padStart(5, "0")}`;
+      await soakPost("/api/import", { items: [{ titleId: id, title: `Soak ${cycle}`, path: FIXTURE, kind: "Game folder", size: 0 }] });
+      await soakPost("/api/build", { titleId: id });
+      let game: any = null;
+      for (let i = 0; i < 100; i++) {
+        game = await soakGame(id);
+        if (game && game.state !== "building") break;
+        await Bun.sleep(40);
+      }
+      const builtOk = game?.state === "built";
+      if (builtOk) {
+        await soakPost("/api/deploy", { titleId: id });
+        for (let i = 0; i < 100; i++) {
+          game = await soakGame(id);
+          if (game && game.state !== "installing") break;
+          await Bun.sleep(40);
+        }
+      }
+      const installedOk = game?.state === "installed";
+      await fetch(`${soakHost}/api/game/${id}`, { method: "DELETE" });
+      let gone = false;
+      for (let i = 0; i < 100; i++) {
+        gone = !(await soakGame(id));
+        if (gone) break;
+        await Bun.sleep(40);
+      }
+      if (builtOk && installedOk && gone) terminalCycles++;
+    }
+    const soakMs = Date.now() - soakStart;
+    const soakRss1 = rssKb();
+    const soakFd1 = fdCount();
+    const soakLat1 = await latency();
+    const finalState = (await (await fetch(`${soakHost}/api/state`)).json()) as any;
+    check("every soak cycle ends built, installed and then gone", terminalCycles === cycles, `${terminalCycles}/${cycles}`);
+    check("the soak run finishes inside 120s", soakMs < 120_000, `${soakMs}ms`);
+    check("RSS stays bounded through the soak", soakRss1 - soakRss0 < 80 * 1024, `${soakRss0}KB -> ${soakRss1}KB`);
+    check("file descriptors do not accumulate", soakFd1 - soakFd0 < 12, `${soakFd0} -> ${soakFd1}`);
+    check("no event stream is left open", Number(finalState.streams) === 0, String(finalState.streams));
+    check(
+      "a cheap endpoint does not degrade",
+      soakLat1 < Math.max(50, soakLat0 * 3) && soakLat1 < 250,
+      `${soakLat0.toFixed(1)}ms -> ${soakLat1.toFixed(1)}ms`,
+    );
+    check("the soak library is empty, matching disk", Array.isArray(finalState.games) && finalState.games.length === 0, `${finalState.games?.length} left`);
+  } finally {
+    soak.child.kill();
+  }
+
   /* ---------------- front 1: disk and child-process faults ---------------- */
   const enginePidFile = join(bootRoot, "engine.pid");
   const faultCommand = `sh -c 'echo $$ > ${enginePidFile}; sleep 1.5; printf "\\177" > "{pkg}"'`;
