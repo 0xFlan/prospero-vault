@@ -13,16 +13,99 @@
 //   ProsperoVault --action quit         # ask the running instance to quit
 //
 // `--login` is what the LaunchAgent runs: if another instance is already
-// serving, it exits instead of adding a second menu bar item.
+// serving, it exits instead of adding a second menu bar item. `--menu-preview`
+// opens the same SwiftUI menu in a normal window so the screenshot tool can
+// capture it without clicking the macOS menu bar.
 import Cocoa
+import SwiftUI
+
+final class MenuModel: ObservableObject {
+    @Published var status = ""
+    @Published var loginEnabled = false
+    var openUI: () -> Void = {}
+    var toggleLogin: () -> Void = {}
+    var showLog: () -> Void = {}
+    var showData: () -> Void = {}
+    var quit: () -> Void = {}
+}
+
+private struct MenuRow: View {
+    let title: String
+    var checked = false
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Text(title)
+                Spacer(minLength: 8)
+                if checked {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+            }
+            .font(.system(size: 13))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(hover ? Color.accentColor.opacity(0.85) : Color.clear)
+            )
+            .foregroundStyle(hover ? Color.white : Color.primary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+    }
+}
+
+/// The status item's menu. The app puts this in its popover; the screenshot
+/// harness puts the same view in a window, so both show one structure.
+struct MenuPanel: View {
+    @ObservedObject var model: MenuModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            MenuRow(title: "Open Prospero Vault", action: model.openUI)
+            Divider().padding(.vertical, 4)
+            Text(model.status)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 2)
+            Divider().padding(.vertical, 4)
+            MenuRow(title: "Launch at Login", checked: model.loginEnabled, action: model.toggleLogin)
+            MenuRow(title: "Show Log", action: model.showLog)
+            MenuRow(title: "Show Data Folder", action: model.showData)
+            Divider().padding(.vertical, 4)
+            MenuRow(title: "Quit Prospero Vault", action: model.quit)
+        }
+        .padding(6)
+        .frame(width: 300)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var server: Process?
     private var poll: Timer?
     private var signalSources: [DispatchSourceSignal] = []
-    private var didStartUI = false
     private var ownsPid = false
+    private var popover: NSPopover?
+    private var previewWindow: NSWindow?
+    private lazy var menuModel: MenuModel = {
+        let model = MenuModel()
+        // Each row closes the panel first, the way the old NSMenu did.
+        model.openUI = { [weak self] in self?.closePanel(); self?.openUI() }
+        model.toggleLogin = { [weak self] in self?.toggleLogin() }
+        model.showLog = { [weak self] in self?.closePanel(); self?.showLog() }
+        model.showData = { [weak self] in self?.closePanel(); self?.showData() }
+        model.quit = { [weak self] in self?.closePanel(); self?.quit() }
+        return model
+    }()
     private let port = Int(ProcessInfo.processInfo.environment["PV_PORT"] ?? "") ?? 8090
 
     var supportDir: URL {
@@ -73,12 +156,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "PV"
         statusItem.button?.toolTip = "Prospero Vault"
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePanel)
 
-        buildMenu()
         startServerIfNeeded()
-        didStartUI = true
+        refreshMenuModel()
+        if CommandLine.arguments.contains("--menu-preview") {
+            showMenuPreview()
+        }
         poll = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            self?.buildMenu()
+            self?.refreshMenuModel()
         }
     }
 
@@ -186,37 +273,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - UI
 
-    private func buildMenu() {
-        let menu = NSMenu()
+    private func refreshMenuModel() {
+        menuModel.status = statusLine()
+        menuModel.loginEnabled = FileManager.default.fileExists(atPath: loginPlist.path)
+    }
 
-        let open = NSMenuItem(title: "Open Prospero Vault", action: #selector(openUI), keyEquivalent: "o")
-        open.target = self
-        menu.addItem(open)
+    private func closePanel() {
+        popover?.performClose(nil)
+    }
 
-        let status = NSMenuItem(title: statusLine(), action: nil, keyEquivalent: "")
-        status.isEnabled = false
-        menu.addItem(status)
-        menu.addItem(.separator())
+    @objc private func togglePanel() {
+        refreshMenuModel()
+        if let open = popover, open.isShown {
+            open.performClose(nil)
+            return
+        }
+        guard let button = statusItem.button else { return }
+        let panel = NSPopover()
+        panel.behavior = .transient
+        panel.contentViewController = NSHostingController(rootView: MenuPanel(model: menuModel))
+        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover = panel
+    }
 
-        let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
-        login.target = self
-        login.state = FileManager.default.fileExists(atPath: loginPlist.path) ? .on : .off
-        menu.addItem(login)
+    /// Shows the menu view in a window for tools/capture-menu.ts. The window
+    /// writes its screen rectangle so the capture is exactly the menu.
+    private func showMenuPreview() {
+        let host = NSHostingView(rootView: MenuPanel(model: menuModel))
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+        let window = NSWindow(
+            contentRect: NSRect(x: 160, y: 160, width: size.width, height: size.height),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        window.backgroundColor = .windowBackgroundColor
+        window.isOpaque = true
+        window.level = .floating
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        previewWindow = window
 
-        let log = NSMenuItem(title: "Show Log", action: #selector(showLog), keyEquivalent: "")
-        log.target = self
-        menu.addItem(log)
-
-        let data = NSMenuItem(title: "Show Data Folder", action: #selector(showData), keyEquivalent: "")
-        data.target = self
-        menu.addItem(data)
-        menu.addItem(.separator())
-
-        let quit = NSMenuItem(title: "Quit Prospero Vault", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-
-        statusItem.menu = menu
+        let screenHeight = NSScreen.screens.first?.frame.height ?? 900
+        let frame = window.frame
+        let bounds = "\(Int(frame.minX)),\(Int(screenHeight - frame.maxY)),\(Int(frame.width)),\(Int(frame.height))"
+        let path = ProcessInfo.processInfo.environment["PV_MENU_BOUNDS"] ?? "/tmp/pv_menu_bounds.txt"
+        try? bounds.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
     private func statusLine() -> String {
@@ -298,7 +403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             _ = installLoginItem()
         }
-        buildMenu()
+        refreshMenuModel()
     }
 
     private func runLaunchctl(_ arguments: [String]) {

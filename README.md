@@ -88,9 +88,8 @@ are absent.
 2. The app starts the server on port 8090. Data lives in
    `~/Library/Application Support/Prospero Vault/data`; the log is
    `~/Library/Logs/Prospero Vault.log`.
-3. **Open Prospero Vault** opens `http://127.0.0.1:8090/`.
-   **Launch at Login** adds the app to your login items. **Show Log** and
-   **Show Data Folder** open those places. **Quit** stops the server.
+3. Open the **PV** menu for the controls. They are listed below the first-run
+   steps.
 4. Find this Mac's address:
 
    ```bash
@@ -106,6 +105,23 @@ are absent.
 If you never use the console, set `"bind": "loopback"` in
 `~/Library/Application Support/Prospero Vault/data/config.json`. The app then
 serves the browser UI on this Mac only.
+
+### Menu bar controls
+
+![Status item menu](docs/screens/status-menu.png)
+
+**The PV menu.** It shows whether the server is running, then the actions.
+
+| Item | What it does |
+| --- | --- |
+| **Open Prospero Vault** | Starts the server if needed and opens `http://127.0.0.1:8090/`. |
+| **Launch at Login** | Adds or removes the login item. The tick shows the current state. |
+| **Show Log** | Opens `~/Library/Logs/Prospero Vault.log`. |
+| **Show Data Folder** | Opens `~/Library/Application Support/Prospero Vault`. |
+| **Quit Prospero Vault** | Stops the server it started and exits. |
+
+The menu is a SwiftUI view shared by the status item and the screenshot tool.
+Regenerate the image with `bun run capture:menu`.
 
 ## Put the payload on the console
 
@@ -281,6 +297,7 @@ network.
 bun run dev        # Mac app on http://localhost:8090
 bun run preview    # console UI on http://localhost:8094
 make -C console    # PS5 payload
+bun run capture:menu  # refresh docs/screens/status-menu.png
 ```
 
 `bun run preview` serves the exact page embedded in the payload and proxies

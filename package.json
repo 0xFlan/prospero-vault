@@ -16,7 +16,8 @@
     "check:gate": "bun run tools/gate-check.ts",
     "check:ui": "bun run tools/ui-flow.ts",
     "check:app": "bun run tools/app-check.ts",
-    "build:app": "./tools/build-app.sh"
+    "build:app": "./tools/build-app.sh",
+    "capture:menu": "bun run tools/capture-menu.ts"
   },
   "engines": {
     "bun": ">=1.1"
