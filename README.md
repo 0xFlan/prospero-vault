@@ -13,6 +13,12 @@ that show what works.
 port 9021. **Firmware 14.xx cannot run this or any other payload**: there is no
 public exploit above 13.60 as of November 2026.
 
+**FPKG install is a second, separate ceiling.** Public kstuff builds install and
+launch debug FPKGs only through **11.60**. On 13.20 the installer accepts the
+request and then rejects the package with `0x80BD0005`; this is a kernel-patch
+limit, not a Vault bug. Mount a dump or image with ShadowMount+ on 13.20, or use
+a console on 11.60 or older for install-and-launch.
+
 ## The screens
 
 These images are renders of the console interface from the Mac preview. They are
@@ -345,9 +351,12 @@ docs/screens/           screenshots used here
 - **Firmware 14.xx cannot run this, or any other payload.** Public exploit
   chains stop at 13.60; 14.00/14.10 are private and 14.20+ has no public
   jailbreak as of November 2026. No Vault change can create kernel access.
-- Install now depends on the console's local installer service on port 8888.
-  If that service is not running, Vault says so instead of pretending the
-  package was handed over.
+- Install now depends on the console's local installer service on port 8888,
+  and on kstuff actually supporting FPKG installs. On 13.20 it does not: the
+  service returns `0x80BD0005` after accepting the request. If the service is
+  missing, Vault says so instead of pretending the package was handed over.
+- An on-console packer would not make this console play the result: FPKG install
+  itself is the ceiling on 13.20. Mounting is the supported path there.
 - The home-screen tile depends on the console's web-app shell. The path can
   differ by firmware; `"shellEboot"` in `config.json` points at another one.
 - The payload cannot change a game's frame rate or resolution.

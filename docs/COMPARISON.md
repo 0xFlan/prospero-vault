@@ -26,10 +26,12 @@ Both are legitimate answers. The difference is what you pay and what you get.
 | Failure reporting | Every failure carries a sentence and a name; simulated builds are labelled and refused by the console | Log lines and a title that does not appear |
 | Requirements | kstuff + elfldr, a Mac with a packer | kstuff, ShadowMount+ stopped |
 | Console firmware | Payload runs on 13.20 (tested); 14.xx has no public exploit | Same exploit ceiling applies |
+| FPKG install/launch | Public kstuff ceiling is 11.60; 13.20 rejects with `0x80BD0005` | Mounts without installing, so it is the working route above 11.60 |
 
 Both tools need a jailbroken console first. As of November 2026 public chains
 stop at **13.60**; 14.00/14.10 are private and 14.20+ has no public jailbreak. No
-application-level change can lift that ceiling.
+application-level change can lift that ceiling. FPKG support is narrower still:
+public kstuff installs and launches debug packages only through **11.60**.
 
 ## Where Kraken Mount is ahead, honestly
 

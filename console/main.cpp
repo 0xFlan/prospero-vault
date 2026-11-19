@@ -458,6 +458,38 @@ bool is_title_id(const char* text) {
 }
 
 /**
+ * Pulls the title id out of a package filename.
+ *
+ * A debug package is normally named after its content id, for example
+ * `UP9000-PTST00001_00-SAMPLE...pkg` or
+ * `ddadcba1e9326627-JP0700-PPSA24913_00-MAINGAME...pkg`. The 16-character
+ * prefix the old scanner kept is neither id: it made an installed package look
+ * uninstalled and sent launch at a title the console never registered. The id
+ * is the nine-character segment between dashes, before the `_00` suffix.
+ */
+void package_title_id(const char* filename, char* out, std::size_t cap) {
+  if (cap) out[0] = '\0';
+  const char* at = filename;
+  while (*at) {
+    const char* dash = std::strchr(at, '-');
+    const char* end = dash ? dash : at + std::strlen(at);
+    const char* underscore = static_cast<const char*>(std::memchr(at, '_', static_cast<std::size_t>(end - at)));
+    const std::size_t length = static_cast<std::size_t>((underscore ? underscore : end) - at);
+    if (length == 9 && length + 1 < cap) {
+      char candidate[10];
+      std::memcpy(candidate, at, length);
+      candidate[length] = '\0';
+      if (is_title_id(candidate)) {
+        std::snprintf(out, cap, "%s", candidate);
+        return;
+      }
+    }
+    if (!dash) break;
+    at = dash + 1;
+  }
+}
+
+/**
  * The image formats a mount payload can attach. They carry no readable
  * filesystem here, so the filename is the only metadata until it is mounted.
  */
@@ -773,8 +805,11 @@ void scan_dir(const char* root, int depth) {
       std::snprintf(stem, sizeof stem, "%s", entry->d_name);
       const std::size_t length = std::strlen(stem);
       if (length > 4) stem[length - 4] = '\0';
-      add_title(stem, entry->d_name, full, "pkg", "PS5", info.st_size, false, title_installed(stem));
-      log_fmt("scan: pkg %s", full);
+      char id[16] = {0};
+      package_title_id(stem, id, sizeof id);
+      if (!id[0]) std::snprintf(id, sizeof id, "%s", stem);
+      add_title(id, entry->d_name, full, "pkg", "PS5", info.st_size, false, title_installed(id));
+      log_fmt("scan: pkg %s (%s)", full, id);
       continue;
     }
 
@@ -2410,9 +2445,9 @@ bool install_package(const char* id, bool launch_after, char* message, std::size
     job_set("handing the package to this console", 12);
     log_fmt("install: %s -> %s", id, path);
 
-    char encoded[640];
+    char encoded[1600];
     url_encode(encoded, sizeof encoded, path);
-    char form[768];
+    char form[1664];
     std::snprintf(form, sizeof form, "paths=%s", encoded);
     char answer[512] = {0};
     const int status = http_call_ex("POST", "http://127.0.0.1:8888/api/install-pkg", form,
