@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { makeDumpFixtures } from "./dump-fixtures";
 
 const PORT = 8123;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -2049,6 +2050,106 @@ async function main(): Promise<void> {
     check("the soak library is empty, matching disk", Array.isArray(finalState.games) && finalState.games.length === 0, `${finalState.games?.length} left`);
   } finally {
     soak.child.kill();
+  }
+
+  /* ---------------- pass 21: real dumps, good and bad, across a restart ---------------- */
+  const mixedDumps = join(bootRoot, "mixed-dumps");
+  const mixedFixtures = await makeDumpFixtures(mixedDumps, { largeMB: 0 });
+  let mixed = await bootApp(
+    "mixed",
+    JSON.stringify({ port: 8172, consoleHost: null, engine: "auto", enginePaths: {}, scanDirs: [] }),
+    null,
+    8172,
+  );
+  let mixedHost = "http://127.0.0.1:8172";
+  let mixedFailures: string[] = [];
+  const mixedPost = (path: string, payload: unknown) =>
+    fetch(`${mixedHost}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  const mixedGame = async (id: string) =>
+    ((await (await fetch(`${mixedHost}/api/state`)).json()) as any).games.find((game: any) => game.titleId === id);
+  const mixedWait = async (id: string, timeoutMs: number) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const game = await mixedGame(id);
+      // "dumped" is queued-but-not-started: waiting on it would read the import
+      // as the build result and delete the title before the build began.
+      if (
+        game &&
+        game.state !== "building" &&
+        game.state !== "installing" &&
+        game.state !== "dumped"
+      )
+        return game;
+      await Bun.sleep(150);
+    }
+    return mixedGame(id);
+  };
+  const mixedAdd = async (id: string, path: string, title: string) => {
+    await mixedPost("/api/import", { items: [{ titleId: id, title, path, kind: "Game folder", size: 0 }] });
+    return mixedPost("/api/build", { titleId: id });
+  };
+  try {
+    const good = mixedFixtures.filter((fixture) => fixture.valid);
+    const broken = mixedFixtures.filter((fixture) => !fixture.valid);
+    check("mixed soak: every fixture shape exists", good.length >= 3 && broken.length >= 2, `${good.length}/${broken.length}`);
+    for (let cycle = 0; cycle < 10; cycle++) {
+      if (cycle === 5) {
+        // Restart in the middle of a working library, then keep building.
+        mixed.child.kill();
+        await Bun.sleep(400);
+        mixed = await bootApp(
+          "mixed",
+          JSON.stringify({ port: 8173, consoleHost: null, engine: "auto", enginePaths: {}, scanDirs: [] }),
+          null,
+          8173,
+        );
+        mixedHost = "http://127.0.0.1:8173";
+        const afterRestart = (await (await fetch(`${mixedHost}/api/state`)).json()) as any;
+        check(
+          "mixed soak: no job is left running after a restart",
+          Array.isArray(afterRestart.games) && !afterRestart.games.some((game: any) => game.state === "building" || game.state === "installing"),
+          JSON.stringify((afterRestart.games ?? []).map((game: any) => `${game.titleId}:${game.state}`)),
+        );
+        check(
+          "mixed soak: finished packages survive the restart",
+          (afterRestart.games ?? []).some((game: any) => game.state === "built"),
+          `${afterRestart.games?.length} games`,
+        );
+      }
+      if (cycle % 2 === 0) {
+        const fixture = good[(cycle / 2) % good.length];
+        const id = fixture.titleId;
+        await mixedAdd(id, fixture.path, fixture.titleId);
+        const game = await mixedWait(id, 180_000);
+        if (game?.state !== "built") mixedFailures.push(`${id}:${game?.state}:${String(game?.note).slice(0, 60)}`);
+        // Keep this one so the restart has a finished package to find.
+        if (cycle !== 4) await fetch(`${mixedHost}/api/game/${id}`, { method: "DELETE" });
+      } else {
+        const fixture = broken[Math.floor(cycle / 2) % broken.length];
+        const id = fixture.titleId;
+        const started = await mixedAdd(id, fixture.path, "Broken");
+        if (!started.ok) mixedFailures.push(`${id}:job=${started.status}`);
+        const game = await mixedWait(id, 60_000);
+        if (game?.state !== "error") mixedFailures.push(`${id}:state=${game?.state}`);
+        if (!/param|content id|eboot/i.test(String(game?.note))) mixedFailures.push(`${id}:note=${String(game?.note).slice(0, 50)}`);
+        await fetch(`${mixedHost}/api/game/${id}`, { method: "DELETE" });
+      }
+    }
+    check("mixed soak: valid and invalid dumps all reached the right end", mixedFailures.length === 0, mixedFailures.slice(0, 4).join(","));
+    const quick = good[0];
+    await mixedAdd(quick.titleId, quick.path, quick.titleId);
+    const last = await mixedWait(quick.titleId, 180_000);
+    check("mixed soak: the queue still builds after the failures and the restart", last?.state === "built", `${last?.state}`);
+    const leftovers = Bun.spawnSync(["bash", "-lc", `find ${JSON.stringify(join(bootRoot, "mixed", "data"))} \\( -name '*.tmp' -o -name '*.partial' -o -name '*.part' \\) -print`])
+      .stdout.toString()
+      .trim();
+    check("mixed soak: no temp files are left behind", leftovers === "", leftovers.slice(0, 80));
+  } finally {
+    mixed.child.kill();
   }
 
   /* ---------------- pass 20: a real packer with no setup ---------------- */

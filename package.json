@@ -11,6 +11,7 @@
     "test": "bun run tools/selftest.ts",
     "check:payload": "bash tools/payload-check.sh",
     "check:pipeline": "bun run tools/pipeline-check.ts",
+    "check:dumps": "bun run tools/dump-check.ts",
     "check:ui": "bun run tools/ui-flow.ts"
   },
   "engines": {

@@ -5,6 +5,9 @@ import {
   PKG_DIR,
   ROOT,
   ensureDirs,
+  findEntry,
+  findIncompleteDumps,
+  sourceCategory,
   isInside,
   lanAddress,
   loadConfig,
@@ -263,11 +266,40 @@ async function runBuild(game: Game): Promise<void> {
     return;
   }
 
+  // A folder with metadata but no eboot packages without complaint and then
   console.log(`  build   ${game.titleId} via ${engine}`);
   game.state = "building";
   buildProgress.set(game.titleId, { pct: 0, line: "queued", state: "building", message: null });
   game.engine = engine;
   game.note = null;
+  touch(game);
+  await persist();
+  broadcast({ type: "state", games });
+
+  // A folder with metadata but no eboot packages without complaint and then
+  // installs to nothing. Refuse it by name instead of shipping a dead package.
+  // The category comes from the dump, not from the import request: a client
+  // that forgets it must not turn DLC into an app. This runs after the state
+  // turns "building", so a caller watching for the job sees a job.
+  const category = await sourceCategory(game.sourcePath);
+  // Only the bundled packer is known to need an eboot; a custom command may
+  // accept images or other trees, so its inputs are not second-guessed.
+  const bundled = !config.enginePaths?.command?.trim();
+  if (
+    engine === "command" &&
+    bundled &&
+    category !== "ac" &&
+    !/\.(exfat|ffpfsc|ffpfs|ffpkg|pkg)$/i.test(game.sourcePath) &&
+    !(await findEntry(game.sourcePath, "eboot.bin"))
+  ) {
+    game.state = "error";
+    game.note = `${game.sourcePath} has no eboot.bin; recopy the dump with its sce_sys folder and eboot.bin.`;
+    touch(game);
+    await persist();
+    broadcast({ type: "state", games });
+    return;
+  }
+
   // Keep the last good package until a new one exists: a failed rebuild must not
   // make an already-installable package vanish from the library.
   const previous = { pkgPath: game.pkgPath, pkgSize: game.pkgSize, simulated: game.simulated };
@@ -284,7 +316,7 @@ async function runBuild(game: Game): Promise<void> {
         titleId: game.titleId,
         title: game.title,
         sourcePath: game.sourcePath,
-        category: game.category,
+        category: category ?? game.category,
         outDir: PKG_DIR,
       },
       config,
@@ -575,8 +607,15 @@ async function handle(req: Request, url: URL): Promise<Response> {
     if (!dir) return bad("A folder path is required");
     if (!existsSync(dir)) return bad(`Folder not found: ${dir}`, 404);
     const found = await scanDir(dir);
+    const problems = await findIncompleteDumps(dir);
     const known = new Set(games.map((g) => g.titleId));
-    return json({ dir, found: found.map((f) => ({ ...f, inLibrary: known.has(f.titleId) })) });
+    return json({
+      dir,
+      found: found.map((f) => ({ ...f, inLibrary: known.has(f.titleId) })),
+      // Folders that look like a dump but cannot be one, named by path, so an
+      // empty result is never mistaken for "the app saw nothing here".
+      problems,
+    });
   }
 
   if (req.method === "POST" && pathname === "/api/import") {
@@ -883,7 +922,16 @@ async function handle(req: Request, url: URL): Promise<Response> {
     if (!game) return bad("Unknown title", 404);
     // Removing a title mid-job leaves the worker writing into a folder nothing
     // points at, and the pkg it produces would never be listed again.
-    if (game.state === "building" || game.state === "installing" || pendingBuilds.has(titleId) || pulling.has(titleId)) {
+    // A job that has already reached a terminal state is safe to remove even if
+    // its queue slot is still being released; blocking that made an error look
+    // stuck for anyone who clicked Remove as soon as it appeared.
+    const terminal = game.state === "error" || game.state === "built" || game.state === "installed";
+    if (
+      game.state === "building" ||
+      game.state === "installing" ||
+      (pendingBuilds.has(titleId) && !terminal) ||
+      pulling.has(titleId)
+    ) {
       return bad("That title is busy. Wait for the job to finish, then remove it.", 409);
     }
 

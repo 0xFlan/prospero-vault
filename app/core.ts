@@ -290,6 +290,28 @@ async function dirSize(path: string, budget = { n: 0 }): Promise<number> {
   return total;
 }
 
+/**
+ * A dump copied off a console, unpacked by a tool, or pulled from an archive
+ * does not always keep Sony's lowercase names: `SCE_SYS/PARAM.JSON` and
+ * `EBOOT.BIN` are common. Look entries up without case, or those dumps are
+ * invisible to a scan that only believes in one spelling.
+ */
+export async function findEntry(dir: string, name: string): Promise<string | null> {
+  try {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.name.toLowerCase() === name.toLowerCase()) return entry.name;
+    }
+  } catch {
+    /* unreadable or missing */
+  }
+  return null;
+}
+
+/** The category a source tree itself declares, never what a client claimed. */
+export async function sourceCategory(dir: string): Promise<string | null> {
+  return (await readTitleMeta(dir)).category;
+}
+
 async function readTitleMeta(
   dir: string,
 ): Promise<{ titleId: string; title: string; hasIcon: boolean; category: string | null }> {
@@ -299,28 +321,88 @@ async function readTitleMeta(
   let hasIcon = false;
   let category: string | null = null;
 
-  const sfoPath = join(dir, "sce_sys", "param.sfo");
-  try {
-    const sfo = parseSfo(await readFile(sfoPath));
-    if (typeof sfo["TITLE_ID"] === "string" && sfo["TITLE_ID"]) titleId = sfo["TITLE_ID"];
-    if (typeof sfo["TITLE"] === "string" && sfo["TITLE"]) title = sfo["TITLE"];
-  } catch {
-    const jsonPath = join(dir, "sce_sys", "param.json");
+  const metaDir = (await findEntry(dir, "sce_sys")) ?? "sce_sys";
+  const sfoName = await findEntry(join(dir, metaDir), "param.sfo");
+  const jsonName = await findEntry(join(dir, metaDir), "param.json");
+
+  if (sfoName) {
     try {
-      const meta = JSON.parse(await readFile(jsonPath, "utf8"));
+      const sfo = parseSfo(await readFile(join(dir, metaDir, sfoName)));
+      if (typeof sfo["TITLE_ID"] === "string" && sfo["TITLE_ID"]) titleId = sfo["TITLE_ID"];
+      if (typeof sfo["TITLE"] === "string" && sfo["TITLE"]) title = sfo["TITLE"];
+    } catch {
+      /* a damaged SFO falls through to param.json */
+    }
+  }
+  if (jsonName) {
+    try {
+      const meta = JSON.parse(await readFile(join(dir, metaDir, jsonName), "utf8"));
       if (meta.titleId) titleId = String(meta.titleId);
       if (meta.titleName) title = String(meta.titleName);
       else if (meta.title) title = String(meta.title);
       if (meta.applicationCategoryType) category = String(meta.applicationCategoryType).toLowerCase();
     } catch {
-      /* no metadata — fall back to the folder name */
+      /* no usable metadata — fall back to the folder name */
     }
   }
 
-  hasIcon = existsSync(join(dir, "sce_sys", "icon0.png")) || existsSync(join(dir, "icon0.png"));
+  hasIcon =
+    Boolean(await findEntry(join(dir, metaDir), "icon0.png")) || Boolean(await findEntry(dir, "icon0.png"));
   if (!title) title = folder;
   if (!titleId) titleId = folder.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 9) || "UNKNOWN";
   return { titleId, title, hasIcon, category };
+}
+
+/**
+ * A folder that carries an eboot but no metadata is almost a dump, and a scan
+ * that returns nothing for it looks like the app did not see the folder at all.
+ * Report those by path and what is missing, so the person can fix the copy.
+ */
+export async function findIncompleteDumps(
+  dir: string,
+  depth = 0,
+): Promise<Array<{ path: string; message: string }>> {
+  const root = resolve(dir);
+  const problems: Array<{ path: string; message: string }> = [];
+  if (depth > 3) return problems;
+  let entries: Awaited<ReturnType<typeof readdir>>;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return problems;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue;
+    const full = join(root, entry.name);
+    if (!entry.isDirectory()) continue;
+    const metaDir = await findEntry(full, "sce_sys");
+    const hasMetadata =
+      metaDir !== null &&
+      (Boolean(await findEntry(join(full, metaDir), "param.json")) ||
+        Boolean(await findEntry(join(full, metaDir), "param.sfo")));
+    if (hasMetadata) {
+      // Metadata without an executable looks like a dump and packages to an
+      // empty app. Only additional content is allowed to have no eboot.
+      const meta = await readTitleMeta(full);
+      if (meta.category !== "ac" && !(await findEntry(full, "eboot.bin"))) {
+        problems.push({
+          path: full,
+          message: `${full} has sce_sys metadata but no eboot.bin; recopy the dump with its executable.`,
+        });
+      }
+      continue;
+    }
+    const eboot = await findEntry(full, "eboot.bin");
+    if (eboot) {
+      problems.push({
+        path: full,
+        message: `${full} has ${eboot} but no sce_sys/param.json; copy the complete dump (param.json or param.sfo, icon0.png and eboot.bin).`,
+      });
+      continue;
+    }
+    problems.push(...(await findIncompleteDumps(full, depth + 1)));
+  }
+  return problems;
 }
 
 export async function scanDir(dir: string, depth = 0): Promise<Found[]> {
@@ -343,9 +425,12 @@ export async function scanDir(dir: string, depth = 0): Promise<Found[]> {
       // A dump is identified by the metadata inside it, not by its folder name.
       // Dumps named after the game — or after a content id, for DLC — used to be
       // invisible unless their folder happened to be a title id.
+      const metaDir = await findEntry(full, "sce_sys");
       const hasMetadata =
-        existsSync(join(full, "sce_sys", "param.json")) || existsSync(join(full, "sce_sys", "param.sfo"));
-      const looksLikeTitle = TITLE_ID.test(entry.name) && existsSync(join(full, "sce_sys"));
+        metaDir !== null &&
+        (Boolean(await findEntry(join(full, metaDir), "param.json")) ||
+          Boolean(await findEntry(join(full, metaDir), "param.sfo")));
+      const looksLikeTitle = TITLE_ID.test(entry.name) && metaDir !== null;
       if (looksLikeTitle || hasMetadata) {
         const meta = await readTitleMeta(full);
         found.push({

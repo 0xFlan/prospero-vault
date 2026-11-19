@@ -11,6 +11,7 @@ const S = {
   version: "",
   pkgDir: "",
   found: [],
+  problems: [],
   scanDir: "",
   selected: null,
   progress: {},
@@ -296,6 +297,18 @@ function viewForge() {
     (dir) => `<button class="tag" data-path="${esc(dir)}">${esc(dir)}</button>`,
   );
 
+  const incomplete = S.problems.length
+    ? `<div class="section-title">Not dumps</div>
+       <div class="list">${S.problems
+         .map(
+           (problem) => `<div class="item">
+             <div class="grow"><div class="name">${esc(problem.path)}</div>
+             <div class="meta">${esc(problem.message)}</div></div>
+           </div>`,
+         )
+         .join("")}</div>`
+    : "";
+
   const results = S.found.length
     ? `<div class="section-title">Found ${S.found.length}</div>
        <div class="list">${S.found
@@ -363,6 +376,7 @@ function viewForge() {
       </div>
       <div class="quick">${quick.join("")}</div>
     </section>
+    ${incomplete}
     ${results}
     ${queue}
     ${readyList}`;
@@ -632,8 +646,17 @@ async function doScan(dir) {
   try {
     const result = await api("POST", "/api/scan", { dir: target });
     S.found = result.found;
+    S.problems = Array.isArray(result.problems) ? result.problems : [];
     render();
-    toast(result.found.length ? `Found ${result.found.length}` : "Nothing packageable in there", !result.found.length);
+    const broken = S.problems.length;
+    toast(
+      broken
+        ? `${broken} folder${broken === 1 ? "" : "s"} cannot be a dump — see Convert`
+        : result.found.length
+          ? `Found ${result.found.length}`
+          : "Nothing packageable in there",
+      !result.found.length,
+    );
   } catch (error) {
     toast(error.message, true);
   } finally {

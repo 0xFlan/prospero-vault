@@ -486,9 +486,13 @@ Verified on this Mac:
   real API contract: rail, hero, tiles, detail sheet, progress modal
 - a full conversion from the new UI: `202` → progress steps → package pulled →
   `.pkg` tile appeared (the mock engine, so the package is a placeholder)
-- the Mac app's own suite: `bun run test` — 23 checks covering discovery, real
-  `param.sfo` parsing, build, serving, `Range` resume, deploy, and that a build
-  leaves no temporary files or scratch folder behind
+- the Mac app's own suite: `bun run test` — 237 checks covering discovery, real
+  `param.sfo` parsing, build, serving, `Range` resume, deploy, a 60-cycle soak,
+  and a mixed good/bad dump soak across a restart, and that a build leaves no
+  temporary files or scratch folder behind
+- `bun run check:dumps` — 38 checks over synthesized PkgEditor-style, uppercase,
+  DLC, 240 MB-payload, missing-metadata, no-eboot and bad-content-id dumps,
+  every one through scan → import → build
 
 **Not verified:** the payload has never run on a PS5. Its scanner, its
 thread-per-connection loop, its writes to `/data/prospero-vault`, its icon cache,
@@ -499,9 +503,65 @@ In particular **the launch path itself has never started a game**. The ELF links
 and the code follows the failure modes documented by payloads that do this, but
 `sceLncUtilLaunchApp` being accepted on your firmware is exactly the kind of
 thing only the console can answer. The first run should be a package you can
-also start from Settings, so a refusal is unambiguous. No real packer
-(`fpkg-cli`, `orbis-pub-cmd`) is installed here, so every package built so far is
-the simulated engine's placeholder.
+also start from Settings, so a refusal is unambiguous. Packages themselves are
+real now: the bundled `acpack` builds them with the managed SHA3 patch, and the
+validator accepts every shape in `bun run check:dumps` — but none of those has
+been installed on a console yet.
+
+## Point it at a real dump
+
+A supported dump is a folder holding the content a PS5 would install:
+
+```
+PPSA01234/                 the folder name does not matter
+  sce_sys/
+    param.json             titleId, titleName, contentId, version, category
+    icon0.png              optional, shown in the library
+  eboot.bin                the game executable
+  ...                      everything else in the dump
+```
+
+- **Any folder name works**, including a title-named folder from a backup and a
+  content-id-named folder for DLC.
+- **Case does not matter**: `SCE_SYS/PARAM.JSON` and `EBOOT.BIN` are found, which
+  is what archive tools and Windows copies produce.
+- **Extra files are fine** — readmes, `.DS_Store`, `__MACOSX`. They are copied
+  into the package, so delete anything large you do not want shipped.
+- **`param.sfo` dumps** (PS4 trees) are read too; `acpack` decides what they
+  become.
+- **DLC** is a dump whose `param.json` says `applicationCategoryType: "ac"`;
+  it is packaged in AC mode.
+- **Dumps over 200,000 files** are listed as truncated and refused rather than
+  walked for an hour.
+
+Scan the folder in Convert, press Add, then Build. With no configuration the app
+uses the bundled packer (`packer/build.sh` builds it once). A folder that looks
+like a dump but cannot be one — metadata without an `eboot.bin`, or an `eboot.bin`
+with no metadata — is listed under **Not dumps** by path instead of disappearing
+from the scan.
+
+### What the diagnostics mean
+
+Every rejection names the file or field and ends the job as `error` — the queue
+keeps working, and a good dump submitted after it still builds.
+
+| Message | What to do |
+|---|---|
+| `... has eboot.bin but no sce_sys/param.json` | the copy is incomplete; recopy the dump including `sce_sys/` |
+| `... has sce_sys metadata but no eboot.bin` | the copy is incomplete; recopy the dump including its executable |
+| `acpack: sce_sys/param.json: missing contentId` | the dump's metadata is incomplete; use the dump tool's own export |
+| `acpack: '<value>' is not a valid content id` | `contentId` must be `XXYYYY-XXXXXXXXX_00-` plus 16 characters |
+| `acpack: sce_sys/nptitle.dat must be 160 bytes` | a broken or hand-edited `nptitle.dat`; restore the original |
+| `acpack: sce_sys/nptitle.dat has a bad magic` | same: the file was replaced, not copied |
+| `this is a retail package` | retail `.pkg` files are encrypted to the buying console and cannot be re-signed |
+| `update content (gp) is not supported` | patches need their base title; package the base game instead |
+
+The synthetic shapes behind these checks are generated, never shipped:
+`tools/dump-fixtures.ts` makes a PkgEditor-style tree, an uppercase/odd-name
+tree with junk files, a DLC tree, a 240 MB payload tree, a folder with no
+metadata and a dump with an invalid content id. `bun run check:dumps` drives all
+of them through scan → import → build and asserts the package magic, size and
+one-package-per-title behaviour.
 
 ## Layout
 
