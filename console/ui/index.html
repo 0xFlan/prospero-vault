@@ -922,48 +922,6 @@
         return "off";
       }
 
-      // The console answers with its firmware and the public install ceiling.
-      // These helpers only read that answer; they never turn a "blocked" into
-      // a hopeful "try it and see".
-      function installState() {
-        var health = S.health || {};
-        return health.install || "unknown";
-      }
-
-      function installLabel() {
-        var state = installState();
-        if (state === "supported") return "Supported";
-        if (state === "blocked") return "Blocked";
-        if (state === "unavailable") return "No path";
-        if (state === "host") return "Host build";
-        return "Unknown";
-      }
-
-      function installReason() {
-        var health = S.health || {};
-        return health.installReason ||
-          "This payload did not report install support. The console's installer will answer when it is asked.";
-      }
-
-      function firmwareName() {
-        var health = S.health || {};
-        return health.firmware || "unknown";
-      }
-
-      function packInstallNote() {
-        var state = installState();
-        if (state === "blocked") {
-          return "This firmware is outside the public install range (through 11.60). The tested 13.20 machine returns 0x80BD0005, so it can still be packed and kept, but not installed here.";
-        }
-        if (state === "unavailable") {
-          return "This firmware has no public exploit, so the result cannot be installed here.";
-        }
-        if (state === "supported") {
-          return "This firmware is inside the public install range (through 11.60), so the result can be installed here.";
-        }
-        return "Install support is unknown; the console's installer will report the real result.";
-      }
-
       function viewConsole() {
         var health = S.health || {};
         var rows = [
@@ -975,28 +933,6 @@
             valueClass: S.mac ? "ok" : "",
             glyph: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="11" rx="1.6"/><path d="M8.5 19.4h7"/></svg>',
             action: "settings",
-          }),
-          row({
-            key: "console:packer",
-            title: "On-console packer",
-            desc: "Dump Forge on 8095 packs a dump without a Mac",
-            value: "Status",
-            glyph: '<svg viewBox="0 0 24 24"><path d="M4.5 7.2l7.5-3.8 7.5 3.8v9.6L12 20.6l-7.5-3.8z"/><path d="M4.5 7.2l7.5 3.8 7.5-3.8M12 11v9.6"/></svg>',
-            action: "packerInfo",
-          }),
-          row({
-            key: "console:firmware",
-            title: "Firmware",
-            desc: "Debug-package install: " + installLabel(),
-            value: firmwareName(),
-            valueClass:
-              installState() === "supported"
-                ? "ok"
-                : installState() === "blocked" || installState() === "unavailable"
-                  ? "warn"
-                  : "",
-            glyph: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>',
-            action: "firmwareInfo",
           }),
           row({
             key: "console:home-app",
@@ -1040,8 +976,8 @@
             action: "rescan",
           }),
         ];
-        return '<div class="section">Connection</div><div class="rows">' + rows.slice(0, 5).join("") + "</div>" +
-          '<div class="section">Library</div><div class="rows">' + rows.slice(5).join("") + "</div>";
+        return '<div class="section">Connection</div><div class="rows">' + rows.slice(0, 4).join("") + "</div>" +
+          '<div class="section">Library</div><div class="rows">' + rows[4] + rows[5] + "</div>";
       }
 
       function viewSettings() {
@@ -1074,7 +1010,7 @@
           '<div class="section">Package building</div><div class="rows">' + rows[0] + "</div>" +
           '<div class="section">Library</div><div class="rows">' + rows[1] + "</div>" +
           '<div class="section">About</div><div class="rows">' + rows[2] + "</div>" +
-          '<div class="note">Packing runs on the Mac by default. With Dump Forge loaded on the console, a dump can also be packed there; the result installs only where kstuff and ppr-patch support debug packages.</div>'
+          '<div class="note">Packing runs on the Mac, because no FPKG packer runs on the console. The console asks it to build, then pulls the finished package into /data/prospero-vault/Games.</div>'
         );
       }
 
@@ -1168,21 +1104,15 @@
 
         S.pending = id;
         openSheet(
-          "<h2>Pack " + esc(game.name) + "?</h2>" +
-            '<div class="note">No Mac is needed for the console path. It uses the Dump Forge engine on ' +
-            "port 8095. " + esc(packInstallNote()) +
-            "</div>" +
+          "<h2>Convert to FPKG?</h2>" +
+            '<div class="note">' + esc(game.name) + " will be packed " +
+            (S.mac ? "on " + esc(S.mac) : "on your Mac (set its address in Settings)") +
+            " and pulled onto this console.</div>" +
             '<div class="actions">' +
-            row({ key: "confirm:console", title: "Pack on this console", desc: "Dump Forge engine, no Mac", action: "packConsole", id: id }) +
-            row({
-              key: "confirm:yes",
-              title: "Pack on the Mac",
-              desc: S.mac ? "Build at " + S.mac : "Set the Mac address in Settings",
-              action: "confirmYes",
-            }) +
-            row({ key: "confirm:no", title: "Cancel", action: "close" }) +
+            row({ key: "confirm:yes", title: "Yes", action: "confirmYes" }) +
+            row({ key: "confirm:no", title: "No", action: "close" }) +
             "</div>",
-          '[data-key="confirm:console"]',
+          '[data-key="confirm:yes"]',
         );
       }
 
@@ -1208,12 +1138,11 @@
 
       function jobTitle(job) {
         var installing = job.kind === "install";
-        var packing = job.kind === "pack";
         if (job.done) {
-          if (!job.ok) return installing ? "Install stopped" : packing ? "Pack stopped" : "Conversion stopped";
+          if (!job.ok) return installing ? "Install stopped" : "Conversion stopped";
           return installing ? "Ready to play" : "Package ready";
         }
-        return installing ? "Installing" : packing ? "Packing on the console" : "Converting";
+        return installing ? "Installing" : "Converting";
       }
 
       function jobCard(job) {
@@ -1432,138 +1361,7 @@
           });
       }
 
-      function packConsole(id) {
-        api("POST", "/api/console-pack", { id: id })
-          .then(function (data) {
-            S.job = {
-              active: true, done: false, ok: false, kind: "pack", id: id, pct: 1,
-              line: "starting", message: (data && data.message) || "Packing on the console…",
-            };
-            closeSheet();
-            trackPack();
-          })
-          .catch(function (error) {
-            toast(error.message, true);
-          });
-      }
-
-      function trackPack() {
-        if (jobTimer) clearInterval(jobTimer);
-        showJob();
-        jobTimer = setInterval(function () {
-          api("GET", "/api/console-pack/status")
-            .then(function (job) {
-              job.kind = "pack";
-              S.job = job;
-              paintJob(job);
-              // A restarted payload forgets the job; do not poll a ghost forever.
-              if (!job.active && !job.done) {
-                clearInterval(jobTimer);
-                jobTimer = null;
-                closeSheet();
-                toast(job.message || "The console pack stopped.", true);
-                return;
-              }
-              if (job.done) {
-                clearInterval(jobTimer);
-                jobTimer = null;
-                showJob();
-                if (job.ok) {
-                  setTimeout(function () {
-                    if (S.sheet) closeSheet();
-                    load();
-                  }, 1800);
-                } else {
-                  load();
-                }
-              }
-            })
-            .catch(function () {
-              clearInterval(jobTimer);
-              jobTimer = null;
-              closeSheet();
-              toast("Lost contact with the payload", true);
-            });
-        }, 700);
-      }
-
-      function packerInfo() {
-        api("GET", "/api/console-pack")
-          .then(function (data) {
-            openSheet(
-              "<h2>On-console packer</h2>" +
-                '<div class="note">' + esc(data.message || "No engine answered.") +
-                (data.available && data.version ? " Version " + esc(data.version) + "." : "") +
-                "</div>" +
-                '<div class="actions">' +
-                row({ key: "packer:close", title: "OK", action: "close" }) +
-                "</div>",
-              '[data-key="packer:close"]',
-            );
-          })
-          .catch(function (error) {
-            toast(error.message, true);
-          });
-      }
-
-      function firmwareInfo() {
-        function show() {
-          openSheet(
-            "<h2>Firmware</h2>" +
-              '<div class="note">This console reports <b>' + esc(firmwareName()) + "</b>.</div>" +
-              '<div class="rows">' +
-              row({
-                key: "fw:install",
-                title: "Debug-package install",
-                desc: installReason(),
-                value: installLabel(),
-                valueClass:
-                  installState() === "supported"
-                    ? "ok"
-                    : installState() === "blocked" || installState() === "unavailable"
-                      ? "warn"
-                      : "",
-              }) +
-              "</div>" +
-              '<div class="note">Packing and mounting still work. A package can be moved to a console where kstuff and ppr-patch support it.</div>' +
-              '<div class="actions" style="margin-top:18px">' +
-              row({ key: "fw:ok", title: "OK", action: "close" }) +
-              "</div>",
-            '[data-key="fw:ok"]',
-          );
-        }
-        if (S.health) {
-          show();
-          return;
-        }
-        api("GET", "/api/health")
-          .then(function (data) {
-            S.health = data;
-            show();
-          })
-          .catch(function (error) {
-            toast(error.message, true);
-          });
-      }
-
       function play(id) {
-        var game = null;
-        for (var i = 0; i < S.games.length; i++) if (S.games[i].id === id) game = S.games[i];
-        if (game && game.kind === "pkg" && game.installed !== true) {
-          var state = installState();
-          if (state === "blocked" || state === "unavailable") {
-            openSheet(
-              "<h2>Install is not available here</h2>" +
-                '<div class="note">' + esc(installReason()) + "</div>" +
-                '<div class="note">Packing and mounting still work. A package can be installed on a console where kstuff and ppr-patch support it.</div>' +
-                '<div class="actions" style="margin-top:18px">' +
-                row({ key: "install:close", title: "OK", action: "close" }) +
-                "</div>",
-              '[data-key="install:close"]',
-            );
-            return;
-          }
-        }
         api("POST", "/api/play", { id: id })
           .then(function (data) {
             // 202: the console accepted the package and installs it first.
@@ -1730,7 +1528,6 @@
           var id = action.getAttribute("data-id");
           if (name === "convert") convert(id);
           else if (name === "confirmYes") convert(S.pending);
-          else if (name === "packConsole") packConsole(id);
           else if (name === "play") play(action.getAttribute("data-id"));
           else if (name === "close") closeSheet();
           else if (name === "cancel") cancelJob();
@@ -1738,8 +1535,6 @@
           else if (name === "rescan") rescan();
           else if (name === "homeApp") homeAppMenu();
           else if (name === "homeAppRemove") removeHomeApp();
-          else if (name === "packerInfo") packerInfo();
-          else if (name === "firmwareInfo") firmwareInfo();
           else if (name === "editMac") settingsMacSheet();
           else if (name === "saveMac") saveMac();
           else if (name === "settings") {
