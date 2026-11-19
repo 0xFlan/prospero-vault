@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>acpack</AssemblyName>
+    <RootNamespace>ProsperoAcPack</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!--
+    Point this at a LibProsperoPkg checkout/build:
+
+      dotnet build -p:LibProsperoPkgPath=/path/to/LibProsperoPkg/src/LibProsperoPkg/LibProsperoPkg.csproj
+
+    Without it the build falls back to the NuGet package, which only works if a
+    matching LibProsperoPkg is published there.
+  -->
+  <ItemGroup Condition="'$(LibProsperoPkgPath)' != ''">
+    <ProjectReference Include="$(LibProsperoPkgPath)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(LibProsperoPkgPath)' == ''">
+    <PackageReference Include="LibProsperoPkg" Version="*" />
+  </ItemGroup>
+
+  <!--
+    The library's signing keys are supplied by the person running the tool, not
+    by this repository. Nothing here bundles or downloads them.
+  -->
+
+</Project>

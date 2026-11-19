@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Prospero Vault</title>
+    <link rel="icon" href="/icon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <nav class="rail">
+        <div class="brand">
+          <span class="mark"></span>
+          <span class="brand-text">PROSPERO<em>VAULT</em></span>
+        </div>
+
+        <button class="nav" data-view="library" data-focus>
+          <span class="glyph">▦</span><span>Library</span>
+        </button>
+        <button class="nav" data-view="forge" data-focus>
+          <span class="glyph">✦</span><span>Convert</span>
+        </button>
+        <button class="nav" data-view="console" data-focus>
+          <span class="glyph">▣</span><span>Console</span>
+        </button>
+        <button class="nav" data-view="settings" data-focus>
+          <span class="glyph">⚙</span><span>Settings</span>
+        </button>
+
+        <div class="rail-foot">
+          <div class="lan" id="lanHint">—</div>
+          <span class="ver" id="railVersion">v0.1.0</span>
+        </div>
+      </nav>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="heading">
+            <h1 id="viewTitle">Library</h1>
+            <p id="viewSub">Everything you own, in one place.</p>
+          </div>
+          <div class="pills" id="pills"></div>
+        </header>
+        <div class="content" id="content"></div>
+      </main>
+    </div>
+
+    <div class="scrim" id="scrim" hidden></div>
+    <aside class="drawer" id="drawer" hidden aria-label="Game details"></aside>
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

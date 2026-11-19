@@ -1,0 +1,1644 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Prospero Vault</title>
+    <link rel="icon" href="data:," />
+    <style>
+      /* Prospero Vault — a package library that behaves like a system app:
+         icon row across the top, list rows, a white focused row, controller hints. */
+      /* PS5 system palette: near-black ground, one white focus, and PlayStation
+         Blue (#0070d1) as the single accent. No other hue is introduced. */
+      :root {
+        --bg: #0d0e12;
+        --row: #26272c;
+        --row-hi: #33343a;
+        --text: #f5f5f7;
+        --muted: #a9aab2;
+        --dim: #797a83;
+        --line: rgba(255, 255, 255, 0.09);
+        --focus: #ffffff;
+        --blue: #0070d1;
+        --ok: #46d68a;
+        --warn: #f2b23c;
+        --err: #ff6b81;
+        --r: 6px;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "SST", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        font-size: 15px;
+        line-height: 1.35;
+        cursor: default;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        top: -20%;
+        left: -10%;
+        right: -10%;
+        height: 90%;
+        pointer-events: none;
+        background: radial-gradient(60% 60% at 22% 20%, rgba(84, 120, 190, 0.16), rgba(16, 16, 19, 0) 70%),
+                    radial-gradient(50% 50% at 88% 0%, rgba(120, 86, 190, 0.1), rgba(16, 16, 19, 0) 70%);
+      }
+      /* The console's ambient field: near-black with a slow drift. Two
+         composited gradient layers, no blur filters — a filter is expensive on
+         the console's compositor at 4K and this must stay cheap. */
+      .bg {
+        position: fixed;
+        top: 0; right: 0; bottom: 0; left: 0;
+        z-index: 0;
+        overflow: hidden;
+        pointer-events: none;
+        background: radial-gradient(120% 80% at 50% -10%, #171a22 0%, #0d0e12 55%, #0a0b0e 100%);
+      }
+      .bg i {
+        position: absolute;
+        width: 78vmax;
+        height: 78vmax;
+        border-radius: 50%;
+        display: block;
+      }
+      .bg i:first-child {
+        left: -24vmax; top: -34vmax;
+        background: radial-gradient(closest-side, rgba(0, 112, 209, 0.10), rgba(0, 112, 209, 0) 72%);
+        animation: drift-a 72s ease-in-out infinite alternate;
+      }
+      .bg i:last-child {
+        right: -30vmax; bottom: -40vmax;
+        background: radial-gradient(closest-side, rgba(122, 144, 178, 0.07), rgba(122, 144, 178, 0) 70%);
+        animation: drift-b 96s ease-in-out infinite alternate;
+      }
+      @keyframes drift-a {
+        from { transform: translate3d(0, 0, 0) scale(1); }
+        to { transform: translate3d(6vmax, 4vmax, 0) scale(1.12); }
+      }
+      @keyframes drift-b {
+        from { transform: translate3d(0, 0, 0) scale(1.08); }
+        to { transform: translate3d(-5vmax, -3vmax, 0) scale(1); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .bg i { animation: none; }
+      }
+
+      .app { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100%; }
+
+      /* ---------------- top bar ---------------- */
+      /* The PS5 shell is a row of icons across the top, not a sidebar. */
+      .sysbar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: flex-end;
+        padding: 16px 34px 6px 30px;
+      }
+      .brand { display: flex; align-items: center; margin-right: 18px; padding-bottom: 25px; }
+      .brand .mark {
+        width: 26px;
+        height: 26px;
+        border-radius: 4px;
+        background: none;
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .nav { display: flex; align-items: flex-end; }
+      .nav .item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 78px;
+        margin-right: 2px;
+        background: none;
+        border: 0;
+        padding: 0;
+        color: var(--muted);
+        font: inherit;
+        cursor: pointer;
+        outline: none;
+      }
+      .nav .tile {
+        width: 40px;
+        height: 40px;
+        border-radius: var(--r);
+        background: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.13s, transform 0.13s;
+      }
+      .nav .tile svg { width: 21px; height: 21px; stroke: currentColor; fill: none; stroke-width: 1.7; }
+      .nav .label { margin-top: 5px; font-size: 10px; letter-spacing: 0.01em; white-space: nowrap; }
+      .nav .item.active .tile { background: #f2f2f3; color: #131316; }
+      .nav .item.active .label { color: var(--text); }
+      .nav .item.focused .tile { outline: 2px solid var(--focus); outline-offset: 3px; }
+      .nav .item.focused .label { color: var(--focus); }
+      .bar-right { margin-left: auto; display: flex; align-items: center; }
+      .bar-right .clock { font-size: 13px; color: var(--muted); letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
+
+      /* ---------------- main ---------------- */
+      .main { flex: 1; min-height: 0; padding: 14px 34px 0; display: flex; flex-direction: column; }
+      .topbar { display: flex; align-items: flex-end; justify-content: space-between; padding: 0 2px 14px; }
+      /* PS5 display type is light, not bold: the weight is what reads as system UI. */
+      .topbar h1 { margin: 0; font-size: 30px; font-weight: 300; letter-spacing: -0.005em; }
+      .topbar .crumbs { display: flex; align-items: center; font-size: 10.5px; color: var(--dim); letter-spacing: 0.13em; text-transform: uppercase; margin-bottom: 7px; }
+      .clock { font-size: 13px; color: var(--muted); letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
+      /* Side padding leaves room for the focus ring, which was being clipped
+         against the edge on the first and last tile of a row. */
+      .scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 3px 10px 84px 4px; }
+      .scroll::-webkit-scrollbar { width: 6px; }
+      .scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 99px; }
+
+      /* ---------------- status ---------------- */
+      /* A system app states facts in one quiet line; it does not sell itself. */
+      .status { display: flex; flex-wrap: wrap; align-items: center; margin: 2px 0 18px; min-height: 16px; }
+      .status .item { display: flex; align-items: center; margin: 0 18px 2px 0; font-size: 11.5px; color: var(--muted); }
+      .status .item b { color: var(--text); font-weight: 500; margin-right: 5px; }
+      .dot { width: 6px; height: 6px; border-radius: 50%; background: #6a6a72; margin-right: 7px; }
+      .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(71, 209, 138, 0.6); }
+      .dot.err { background: var(--err); }
+      .dot.warn { background: var(--warn); }
+
+      /* ---------------- tiles ---------------- */
+      /* Fixed width: a library with three titles should look like three tiles,
+         not three billboards stretched across the screen. */
+      .tiles { display: grid; grid-template-columns: repeat(auto-fill, 164px); grid-gap: 22px 20px; }
+      /* Offscreen tiles are skipped where the engine supports it, and layout is
+         contained where it does not: a 200-title grid stays cheap to scroll. */
+      .tiles > .tile { contain: layout style; content-visibility: auto; contain-intrinsic-size: auto 214px; }
+      .tile {
+        background: none;
+        border: 0;
+        padding: 0;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+        outline: none;
+      }
+      .art {
+        position: relative;
+        width: 100%;
+        /* A real square, not a padding-top hack: the old box had zero content
+           height, so absolutely positioned insets (the focus ring) collapsed
+           onto its bottom edge. */
+        aspect-ratio: 1 / 1;
+        border-radius: 6px;
+        overflow: hidden;
+        background: #23232a;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+        /* Only the artwork scales, so the label never reflows and the focus
+           transition stays a compositor job rather than a repaint. */
+        contain: paint;
+        transition: transform 0.14s;
+      }
+      .art > .fill {
+        position: absolute;
+        top: 0; right: 0; bottom: 0; left: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #23232a;
+      }
+      .art img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+      .art .ini { font-size: 26px; font-weight: 600; letter-spacing: 0.02em; color: rgba(255, 255, 255, 0.9); }
+      .art .kind {
+        position: absolute;
+        left: 8px;
+        top: 8px;
+        padding: 3px 7px;
+        border-radius: 4px;
+        font-size: 8.5px;
+        font-weight: 600;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        background: rgba(10, 10, 12, 0.74);
+        color: #cfd6e2;
+      }
+      .art .kind.pkg { color: #9fe8c3; }
+      .tile .name {
+        margin-top: 9px;
+        font-size: 12.5px;
+        font-weight: 500;
+        color: #e9e9ee;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tile .sub { margin-top: 2px; font-size: 10.5px; color: var(--dim); letter-spacing: 0.02em; }
+      .tile.focused .art { transform: scale(1.045); }
+      /* An inset ring, not an outline: the artwork clips paint, so an outer
+         outline was visible on one edge only. PS5 draws the ring on the tile. */
+      /* A real element, not an ::after: the generated box painted only its
+         bottom edge inside the artwork's clipping context. */
+      .ring { display: none; }
+      .tile.focused .ring {
+        display: block;
+        position: absolute;
+        /* Inset: a ring flush with the artwork edge is shaved away by the
+           artwork's paint clipping, leaving one visible side. */
+        top: 6px; right: 6px; bottom: 6px; left: 6px;
+        border: 3px solid var(--focus);
+        border-radius: 4px;
+        pointer-events: none;
+        z-index: 2;
+      }
+      .tile.focused .name { color: #fff; }
+
+      /* ---------------- rows ---------------- */
+      .rows { display: flex; flex-direction: column; max-width: 1400px; }
+      .row {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        min-height: 58px;
+        padding: 0 18px;
+        margin-bottom: 8px;
+        border: 0;
+        border-radius: 6px;
+        background: var(--row);
+        color: var(--text);
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+        outline: none;
+        transition: background 0.12s, transform 0.12s;
+      }
+      .row .glyph { width: 20px; height: 20px; margin-right: 15px; color: var(--muted); flex: 0 0 20px; }
+      .row .glyph svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.7; }
+      .row .body { flex: 1; min-width: 0; padding: 10px 0; }
+      .row .title { display: block; font-size: 14px; }
+      .row .desc { display: block; font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+      .row .value { color: var(--muted); font-size: 12.5px; margin-left: 16px; white-space: nowrap; }
+      .row .value.ok { color: var(--ok); }
+      .row .value.err { color: var(--err); }
+      .row .chev { width: 9px; height: 9px; border-right: 1.6px solid var(--dim); border-top: 1.6px solid var(--dim); transform: rotate(45deg); margin-left: 14px; flex: 0 0 9px; }
+      .row:hover { background: var(--row-hi); }
+      .row.focused { background: var(--focus); color: #141417; transform: scale(1.006); }
+      .row[disabled] { opacity: 0.42; cursor: default; }
+      .row[disabled]:hover { background: var(--row); }
+      .row.focused .desc, .row.focused .value { color: #4a4a52; }
+      .row.focused .glyph, .row.focused .chev { color: #2a2a30; border-color: #2a2a30; }
+      .section { margin: 22px 0 10px; font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+      .section:first-child { margin-top: 2px; }
+
+      .empty { padding: 60px 10px; text-align: center; color: var(--muted); }
+      .empty b { display: block; font-size: 16px; font-weight: 500; color: var(--text); margin-bottom: 8px; }
+      .empty span { font-size: 12.5px; line-height: 1.7; }
+
+      /* ---------------- hints ---------------- */
+      .hints {
+        position: absolute;
+        right: 34px;
+        bottom: 16px;
+        display: flex;
+        align-items: center;
+        font-size: 11px;
+        color: var(--muted);
+        z-index: 10;
+        pointer-events: none;
+      }
+      .hints .hint { display: flex; align-items: center; margin-left: 18px; }
+      .key {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: 1.3px solid #8d8d96;
+        color: #cfcfd6;
+        font-size: 9px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-right: 7px;
+      }
+
+      /* ---------------- sheet ---------------- */
+      .scrim {
+        position: fixed;
+        top: 0; right: 0; bottom: 0; left: 0;
+        background: rgba(6, 6, 8, 0.7);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 20;
+      }
+      .scrim[hidden] { display: none; }
+      .sheet {
+        width: 720px;
+        max-width: 92vw;
+        max-height: 86vh;
+        overflow-y: auto;
+        border-radius: 12px;
+        background: #1b1b20;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 40px 100px rgba(0, 0, 0, 0.6);
+        padding: 28px;
+      }
+      /* flex-start, not stretch: the square artwork used to be pulled to the
+         height of the action list and read as a tall rectangle. */
+      .note { margin-top: 18px; font-size: 12px; line-height: 1.6; color: var(--dim); }
+      .note.err { color: #ffb3bf; }
+      .note.ok { color: #a8e9c7; }
+
+      /* ---------------- job card ---------------- */
+      .job { width: 560px; max-width: 90vw; border-radius: 12px; background: #1b1b20; border: 1px solid rgba(255, 255, 255, 0.08); padding: 26px; box-shadow: 0 40px 100px rgba(0, 0, 0, 0.6); }
+      .job h2 { margin: 0; font-size: 18px; font-weight: 500; }
+      .job .stage { margin-top: 6px; font-size: 12.5px; color: var(--muted); min-height: 18px; }
+      .bar { margin-top: 20px; height: 4px; border-radius: 99px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
+      .bar > i { display: block; height: 100%; width: 0; background: var(--focus); border-radius: 99px; transition: width 0.25s linear; }
+      .job .foot { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; }
+      .job .pct { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .job .done { margin-top: 18px; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+
+      /* ---------------- input ---------------- */
+      .field {
+        width: 100%;
+        margin-top: 16px;
+        padding: 13px 14px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: #101014;
+        color: var(--text);
+        font: inherit;
+        font-size: 14px;
+        outline: none;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      .field:focus { border-color: rgba(255, 255, 255, 0.5); }
+
+      /* Notifications arrive top-right, the way the console shows them. */
+      .toast {
+        position: fixed;
+        right: 34px;
+        top: 92px;
+        max-width: 44vw;
+        animation: toast-in 0.16s ease-out;
+        padding: 11px 18px;
+        border-radius: 6px;
+        background: rgba(28, 28, 33, 0.97);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: var(--text);
+        font-size: 12.5px;
+        z-index: 40;
+      }
+      .toast.err { border-color: rgba(255, 107, 129, 0.5); color: #ffc3cc; }
+      .toast[hidden] { display: none; }
+      @keyframes toast-in {
+        from { opacity: 0; transform: translateY(-6px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      /* A running job stays reachable after its panel is hidden. */
+      .jobchip {
+        position: fixed;
+        left: 34px;
+        bottom: 14px;
+        display: flex;
+        align-items: center;
+        padding: 8px 13px;
+        border-radius: 6px;
+        background: rgba(38, 38, 44, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: var(--muted);
+        font: inherit;
+        font-size: 11.5px;
+        z-index: 10;
+        cursor: pointer;
+        outline: none;
+      }
+      .jobchip[hidden] { display: none; }
+      .jobchip.focused { outline: 2px solid var(--focus); outline-offset: 2px; color: var(--text); }
+      .jobchip b { color: var(--text); font-weight: 500; margin-left: 8px; font-variant-numeric: tabular-nums; }
+      .jobchip .mini { width: 54px; height: 3px; border-radius: 99px; background: rgba(255, 255, 255, 0.16); margin-left: 10px; overflow: hidden; }
+      .jobchip .mini i { display: block; height: 100%; background: var(--focus); }
+
+      @media (max-width: 900px) {
+        .sysbar { padding: 12px 20px 4px 18px; }
+        .nav .item { width: 66px; }
+        .nav .label { font-size: 9px; }
+        .main { padding-right: 20px; }
+        .hero p { max-width: 100%; }
+        .tiles { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bg" aria-hidden="true"><i></i><i></i></div>
+        <div class="app">
+      <header class="sysbar">
+        <div class="brand">
+          <span class="mark" aria-hidden="true">PV</span>
+        </div>
+
+        <nav class="nav" id="nav">
+          <button class="item" data-view="library" data-focus>
+            <span class="tile">
+              <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.6" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.6" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.6" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.6" /></svg>
+            </span>
+            <span class="label">Library</span>
+          </button>
+          <button class="item" data-view="packages" data-focus>
+            <span class="tile">
+              <svg viewBox="0 0 24 24"><path d="M12 3.6l7.4 3.8v9.2L12 20.4 4.6 16.6V7.4L12 3.6z" /><path d="M4.8 7.6L12 11.4l7.2-3.8M12 11.4v8.8" /></svg>
+            </span>
+            <span class="label">Packages</span>
+          </button>
+          <button class="item" data-view="console" data-focus>
+            <span class="tile">
+              <svg viewBox="0 0 24 24"><rect x="3" y="4.6" width="18" height="12.4" rx="1.8" /><path d="M8.4 20.4h7.2M12 17v3.4" /></svg>
+            </span>
+            <span class="label">Console</span>
+          </button>
+          <button class="item" data-view="settings" data-focus>
+            <span class="tile">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1" /><path d="M19.4 13.6a7.6 7.6 0 000-3.2l1.7-1.3-1.8-3.1-2 .8a7.7 7.7 0 00-2.8-1.6L14.2 3h-4.4l-.3 2.2a7.7 7.7 0 00-2.8 1.6l-2-.8L2.9 9.1l1.7 1.3a7.6 7.6 0 000 3.2L2.9 14.9l1.8 3.1 2-.8a7.7 7.7 0 002.8 1.6l.3 2.2h4.4l.3-2.2a7.7 7.7 0 002.8-1.6l2 .8 1.8-3.1-1.7-1.3z" /></svg>
+            </span>
+            <span class="label">Settings</span>
+          </button>
+        </nav>
+
+        <div class="bar-right">
+          <span class="clock" id="clock"></span>
+        </div>
+      </header>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="crumbs" id="crumbs">Library</div>
+            <h1 id="heading">Your games</h1>
+          </div>
+        </header>
+        <div class="scroll" id="scroll"></div>
+      </main>
+
+      <div class="hints" id="hints">
+        <span class="hint"><span class="key">✕</span>Select</span>
+        <span class="hint"><span class="key">○</span>Back</span>
+        <span class="hint"><span class="key">△</span>Rescan</span>
+      </div>
+
+      <button class="jobchip" id="jobChip" data-focus hidden></button>
+    </div>
+
+    <div class="scrim" id="scrim" hidden></div>
+    <div class="toast" id="toast" hidden></div>
+
+    <script>
+      var S = {
+        view: "library",
+        games: [],
+        mac: "",
+        health: null,
+        job: null,
+        focus: null,
+        sheet: null,
+        loaded: false,
+        scanning: false,
+        playing: false,
+        body: "",   // last /api/games body, so an identical answer paints nothing
+        etag: "",   // sent back as If-None-Match
+        rev: "",    // tag without quotes, appended to icon URLs
+        pollDown: false,  // the last poll failed while a list was on screen
+      };
+      var VERSION = "0.11.0";
+
+      var scroll = document.getElementById("scroll");
+      var scrim = document.getElementById("scrim");
+      var toastEl = document.getElementById("toast");
+
+      /* ---------------- helpers ---------------- */
+
+      function esc(value) {
+        return String(value == null ? "" : value).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+
+      function size(bytes) {
+        if (!bytes) return "0 B";
+        var units = ["B", "KB", "MB", "GB", "TB"];
+        var value = bytes;
+        var unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+          value /= 1024;
+          unit++;
+        }
+        return (value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)) + " " + units[unit];
+      }
+
+      // Artwork is the game's own icon when there is one; until then a muted
+      // system-palette tile, never a saturated rainbow.
+      // Neutral, PS5-like placeholders: the system never invents a colour for
+      // artwork it does not have, so these stay grey-blue rather than decorative.
+      var PALETTE = [
+        ["#31343c", "#15171b"],
+        ["#2f3540", "#14161a"],
+        ["#33323a", "#16151a"],
+        ["#2b3339", "#131619"],
+        ["#363640", "#17171c"],
+        ["#302e36", "#161418"],
+      ];
+
+      function palette(seed) {
+        var value = 0;
+        var text = String(seed || "PV");
+        for (var i = 0; i < text.length; i++) value = (value * 31 + text.charCodeAt(i)) % 997;
+        return PALETTE[value % PALETTE.length];
+      }
+
+      function initials(name) {
+        var words = String(name || "?").replace(/[^A-Za-z0-9 ]/g, " ").trim().split(/\s+/);
+        if (!words[0]) return "?";
+        if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+        return (words[0].charAt(0) + words[1].charAt(0)).toUpperCase();
+      }
+
+      function toast(message, isError) {
+        toastEl.textContent = message;
+        toastEl.className = "toast" + (isError ? " err" : "");
+        toastEl.hidden = false;
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(function () {
+          toastEl.hidden = true;
+        }, 4200);
+      }
+
+      // A payload on the loopback interface answers in milliseconds, so a wait
+      // past half a minute means it is not going to. Without this the caller sat
+      // on a spinner for good, and a hung poll stopped the list updating with no
+      // sign that it had stopped. Racing the fetch keeps the page usable; the
+      // request itself still finishes in the background if it ever does.
+      //
+      // A race is used rather than AbortController, which this WebKit may not
+      // have: a missing abort would break every call, a raced promise cannot.
+      function within(promise, ms, message) {
+        return new Promise(function (resolve, reject) {
+          var timer = setTimeout(function () {
+            reject(new Error(message || "The console did not answer in time. Try again."));
+          }, ms);
+          promise.then(
+            function (value) {
+              clearTimeout(timer);
+              resolve(value);
+            },
+            function (error) {
+              clearTimeout(timer);
+              reject(error);
+            }
+          );
+        });
+      }
+
+      function api(method, path, payload, timeoutMs) {
+        var options = { method: method };
+        if (payload) {
+          options.headers = { "content-type": "application/json" };
+          options.body = JSON.stringify(payload);
+        }
+        // "Failed to fetch" is the browser's wording; it tells the player
+        // nothing about what happened or what to do next.
+        var work = Promise.resolve()
+          .then(function () {
+            return fetch(path, options);
+          })
+          .catch(function () {
+            throw new Error("The console is not answering. Reload this page once the app is running.");
+          })
+          .then(function (res) {
+          return res.text().then(function (text) {
+            var data = null;
+            try {
+              data = text ? JSON.parse(text) : null;
+            } catch (e) {
+              data = { message: text };
+            }
+            if (!res.ok) {
+              var message = (data && (data.message || data.error)) || "HTTP " + res.status;
+              var error = new Error(message);
+              error.status = res.status;
+              throw error;
+            }
+            return data;
+          });
+        });
+
+        return within(work, timeoutMs || 30000);
+      }
+
+      function isPackage(game) {
+        return game.kind === "pkg" || game.pkg === true;
+      }
+
+      // A package or a mounted image has a title the launcher can start; a bare
+      // dump folder has to be packaged first.
+      function canPlay(game) {
+        // An app the console already holds starts with one launcher call, so it
+        // is playable even when no .pkg file was ever left behind.
+        if (game.kind === "app") return true;
+        if (game.kind === "pkg") return true;
+        // Images are the one format the shell cannot mount on its own, so the
+        // list says whether anything is running that can. An older payload
+        // sends no field, and then Play is left available.
+        if (game.kind === "image") return game.native !== false;
+        return false;
+      }
+
+      function needsMount(game) {
+        return game.kind === "image" && game.native === false;
+      }
+
+      // A package is playable once this console has installed it; before that,
+      // Play installs first. An image is mounted at launch, so it is always
+      // ready, and a dump has to be converted before either applies.
+      function needsInstall(game) {
+        return game.kind === "pkg" && game.installed !== true;
+      }
+
+      function formatTag(game) {
+        if (game.kind === "app") return "APP";
+        if (game.kind === "pkg") return "FPKG";
+        if (game.kind === "image") return "IMG";
+        return game.platform === "PS4" ? "PS4" : "PS5";
+      }
+
+      function formatLabel(game) {
+        if (game.kind === "app") return "Installed app";
+        if (game.kind === "pkg") return "Package";
+        if (game.kind === "image") return "Disc image";
+        return (game.platform === "PS4" ? "PS4" : "PS5") + " dump";
+      }
+
+      function counts() {
+        var packages = 0;
+        var apps = 0;
+        for (var i = 0; i < S.games.length; i++) {
+          if (isPackage(S.games[i])) packages++;
+          else if (S.games[i].kind === "app") apps++;
+        }
+        return {
+          total: S.games.length,
+          packages: packages,
+          apps: apps,
+          dumps: S.games.length - packages - apps,
+        };
+      }
+
+      /* ---------------- focus ---------------- */
+
+      // While a modal is open, focus belongs inside it — including the job card,
+      // which is not a .sheet. Otherwise the grid behind keeps the focus and
+      // Enter opens a title over the job, losing the cancel button underneath.
+      function scope() {
+        return scrim.hidden ? document : scrim;
+      }
+
+      function focusables() {
+        var list = [].slice.call(scope().querySelectorAll("[data-focus]"));
+        return list.filter(function (node) {
+          // getClientRects, not offsetParent: a fixed-position chip has no
+          // offsetParent and used to be unreachable by the controller.
+          return !node.disabled && node.getClientRects().length > 0;
+        });
+      }
+
+      function setFocus(node, silent) {
+        var previous = document.querySelectorAll(".focused");
+        for (var i = 0; i < previous.length; i++) previous[i].classList.remove("focused");
+        if (!node) return;
+        node.classList.add("focused");
+        S.focus = node.getAttribute("data-key") || node.getAttribute("data-view") || node.id || null;
+        if (!silent && node.scrollIntoView) node.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+
+      function restoreFocus() {
+        var nodes = focusables();
+        if (!nodes.length) return;
+        var wanted = null;
+        for (var i = 0; i < nodes.length; i++) {
+          var key = nodes[i].getAttribute("data-key") || nodes[i].getAttribute("data-view") || nodes[i].id;
+          if (S.focus && key === S.focus) wanted = nodes[i];
+        }
+        setFocus(wanted || nodes[0], true);
+      }
+
+      function moveFocus(dx, dy) {
+        var nodes = focusables();
+        if (!nodes.length) return;
+        var current = document.querySelector(".focused");
+        if (!current || nodes.indexOf(current) === -1) {
+          setFocus(nodes[0]);
+          return;
+        }
+        var base = current.getBoundingClientRect();
+        var cx = base.left + base.width / 2;
+        var cy = base.top + base.height / 2;
+        var best = null;
+        var bestScore = Infinity;
+
+        for (var i = 0; i < nodes.length; i++) {
+          var node = nodes[i];
+          if (node === current) continue;
+          var box = node.getBoundingClientRect();
+          var ox = box.left + box.width / 2 - cx;
+          var oy = box.top + box.height / 2 - cy;
+          var forward = dx !== 0 ? (dx > 0 ? ox > 8 : ox < -8) : dy > 0 ? oy > 8 : oy < -8;
+          if (!forward) continue;
+          var primary = dx !== 0 ? Math.abs(ox) : Math.abs(oy);
+          var secondary = dx !== 0 ? Math.abs(oy) : Math.abs(ox);
+          var score = primary + secondary * 2.4;
+          if (score < bestScore) {
+            bestScore = score;
+            best = node;
+          }
+        }
+        if (best) setFocus(best);
+      }
+
+      function activate() {
+        var node = document.querySelector(".focused");
+        if (!node) return;
+        if (node.tagName === "INPUT") return;
+        node.click();
+      }
+
+      /* ---------------- views ---------------- */
+
+      var HEADINGS = {
+        library: { crumb: "Library", title: "Your games" },
+        packages: { crumb: "Packages", title: "Packages on this console" },
+        console: { crumb: "Console", title: "This PlayStation 5" },
+        settings: { crumb: "Settings", title: "Settings" },
+      };
+
+      function heroMark() {
+        return (
+          '<svg viewBox="0 0 48 48" aria-hidden="true">' +
+          '<circle cx="24" cy="24" r="15" fill="none" stroke="#ffffff" stroke-width="1.1"/>' +
+          '<circle cx="24" cy="24" r="4" fill="#ffffff"/>' +
+          '<g stroke="#ffffff" stroke-width="1.1" stroke-linecap="round">' +
+          '<path d="M24 9v6M24 33v6M9 24h6M33 24h6"/>' +
+          '<path d="M13.4 13.4l4.2 4.2M30.4 30.4l4.2 4.2M34.6 13.4l-4.2 4.2M17.6 30.4l-4.2 4.2"/>' +
+          "</g></svg>"
+        );
+      }
+
+      function artMarkup(game, extraClass) {
+        var tone = palette(game.id);
+        var initialsMarkup = '<span class="ini">' + esc(initials(game.name)) + "</span>";
+        // The tag moves with the library, so a title whose artwork changed is
+        // fetched again instead of coming from the browser's ten-minute cache.
+        var image = game.icon
+          ? '<img src="/api/icon/' + encodeURIComponent(game.id) + (S.rev ? "?v=" + S.rev : "") +
+            '" alt="" loading="lazy" decoding="async" onerror="this.remove()">'
+          : "";
+        return (
+          '<div class="art' + (extraClass ? " " + extraClass : "") + '">' +
+          '<div class="fill" style="background:linear-gradient(150deg,' + tone[0] + "," + tone[1] + ')">' +
+          initialsMarkup + image + "</div>" +
+          '<span class="kind ' + (canPlay(game) ? "pkg" : "dump") + '">' + esc(formatTag(game)) + "</span>" +
+          '<span class="ring" aria-hidden="true"></span>' +
+          "</div>"
+        );
+      }
+
+      // One quiet line of facts, the way a system app reports state. No panel,
+      // no tagline: the library is the content, not the advertising.
+      function statusLine() {
+        var c = counts();
+        if (!S.games.length && !S.scanning) return "";
+        var parts =
+          '<span class="item"><b>' + c.total + "</b>title" + (c.total === 1 ? "" : "s") + "</span>" +
+          '<span class="item"><b>' + c.dumps + "</b>dump" + (c.dumps === 1 ? "" : "s") + "</span>" +
+          '<span class="item"><b>' + c.packages + "</b>package" + (c.packages === 1 ? "" : "s") + "</span>";
+        if (c.apps) parts += '<span class="item"><b>' + c.apps + "</b>installed</span>";
+        parts +=
+          '<span class="item"><span class="dot ' + (S.mac ? "ok" : "warn") + '"></span>' +
+          (S.mac ? "Mac linked" : "Mac not set") + "</span>";
+        if (S.health && S.health.free > 0) parts += '<span class="item">' + size(S.health.free) + " free</span>";
+        if (S.playing) parts += '<span class="item"><span class="dot ok"></span>Playing</span>';
+        return '<div class="status">' + parts + "</div>";
+      }
+
+      function viewLibrary() {
+        if (!S.games.length) {
+          if (S.scanning) {
+            return (
+              '<div class="empty"><b>Looking for games…</b>' +
+              "Walking /data, /user/data and the USB mounts. This screen fills in as titles are found.</div>"
+            );
+          }
+          return (
+            '<div class="empty"><b>No games found</b>' +
+            "Scanned /data, /user/data and the USB mounts for PS5 and PS4 dumps, FPKGs and disc images.<br>" +
+            "Copy one onto a drive, then press △ to rescan.</div>"
+          );
+        }
+
+        var tiles = S.games
+          .map(function (game) {
+            var label = game.size
+              ? size(game.size)
+              : (game.platform ? game.platform + " · " + game.id : game.id);
+            if (game.kind === "pkg") {
+              label = (game.installed === true ? "Installed · " : "Needs install · ") + label;
+            }
+            return (
+              '<button class="tile" data-focus data-key="game:' + esc(game.id) + '" data-id="' + esc(game.id) + '">' +
+              artMarkup(game) +
+              '<div class="name">' + esc(game.name) + "</div>" +
+              '<div class="sub">' + esc(label) + "</div>" +
+              "</button>"
+            );
+          })
+          .join("");
+
+        return statusLine() + '<div class="tiles">' + tiles + "</div>";
+      }
+
+      function row(options) {
+        // The glyph slot is always rendered so every label lines up.
+        var glyph = '<span class="glyph">' + (options.glyph || "") + "</span>";
+        var value = options.value
+          ? '<span class="value' + (options.valueClass ? " " + options.valueClass : "") + '">' + esc(options.value) + "</span>"
+          : "";
+        var chev = options.chevron ? '<span class="chev"></span>' : "";
+        return (
+          '<button class="row" data-focus data-key="' + esc(options.key) + '"' +
+          (options.action ? ' data-action="' + esc(options.action) + '"' : "") +
+          (options.id ? ' data-id="' + esc(options.id) + '"' : "") +
+          (options.disabled ? " disabled" : "") + ">" +
+          glyph +
+          '<span class="body"><span class="title">' + esc(options.title) + "</span>" +
+          (options.desc ? '<span class="desc">' + esc(options.desc) + "</span>" : "") +
+          "</span>" + value + chev +
+          "</button>"
+        );
+      }
+
+      function viewPackages() {
+        var packages = S.games.filter(isPackage);
+        if (!packages.length) {
+          return (
+            '<div class="empty"><b>Nothing packaged yet</b>' +
+            "Convert a dump from the Library and the finished package lands here.</div>"
+          );
+        }
+        var rows = packages
+          .map(function (game) {
+            return row({
+              key: "pkg:" + game.id,
+              title: game.name,
+              desc: game.id + (game.size ? " · " + size(game.size) : ""),
+              value: "Play",
+              glyph:
+                '<svg viewBox="0 0 24 24"><path d="M8.6 5.8l9 6.2-9 6.2V5.8z"/></svg>',
+              action: "play",
+              id: game.id,
+            });
+          })
+          .join("");
+        return '<div class="rows">' + rows + "</div>";
+      }
+
+      // Installed means the payload was told so by ShadowMountPlus, not that a
+      // folder was written: those are different facts and only one is a tile.
+      function homeAppState() {
+        var health = S.health || {};
+        if (health.homeApp === true) return "on";
+        if (health.homeAppState === 2) return "pending";
+        return "off";
+      }
+
+      function viewConsole() {
+        var health = S.health || {};
+        var rows = [
+          row({
+            key: "console:mac",
+            title: "Mac link",
+            desc: S.mac ? "Packages are built at " + S.mac : "No Mac set. Open Settings to add one.",
+            value: S.mac ? "Linked" : "Not set",
+            valueClass: S.mac ? "ok" : "",
+            glyph: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="11" rx="1.6"/><path d="M8.5 19.4h7"/></svg>',
+            action: "settings",
+          }),
+          row({
+            key: "console:home-app",
+            title: "Home screen app",
+            desc:
+              homeAppState() === "on"
+                ? "Registered with ShadowMountPlus. Its tile opens this interface full screen."
+                : homeAppState() === "pending"
+                  ? "Written to /data/homebrew, but ShadowMountPlus has not registered it."
+                  : "Add this app to the home screen's app row.",
+            value: homeAppState() === "on" ? "Installed" : homeAppState() === "pending" ? "Pending" : "Add",
+            valueClass: homeAppState() === "on" ? "ok" : homeAppState() === "pending" ? "warn" : "",
+            glyph: '<svg viewBox="0 0 24 24"><rect x="3.2" y="4.4" width="17.6" height="15.2" rx="2"/><path d="M7.4 9.6h9.2M7.4 13.2h6"/></svg>',
+            action: "homeApp",
+          }),
+          row({
+            key: "console:free",
+            title: "Storage",
+            desc: "/data, where packages are kept",
+            value: health.free > 0 ? size(health.free) + " free" : "unknown",
+            glyph: '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="6.6" rx="7.4" ry="2.8"/><path d="M4.6 6.6v10.8c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9V6.6"/><path d="M4.6 12c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9"/></svg>',
+          }),
+          row({
+            key: "console:version",
+            title: "Payload",
+            desc: "Prospero Vault on this console",
+            value: "v" + (health.version || VERSION),
+            glyph: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.6v4.6l3.2 1.9"/></svg>',
+          }),
+          row({
+            key: "console:folder",
+            title: "Games folder",
+            desc: "/data/prospero-vault/Games",
+            glyph: '<svg viewBox="0 0 24 24"><path d="M3.4 6.6h6l1.8 2.4h9.4v9.2a1.4 1.4 0 01-1.4 1.4H4.8a1.4 1.4 0 01-1.4-1.4V6.6z"/></svg>',
+          }),
+          row({
+            key: "console:rescan",
+            title: "Rescan for games",
+            desc: "Walk /data, /user/data and the USB mounts again",
+            glyph: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.6 5.9"/><path d="M20 5.4V12h-6.4"/></svg>',
+            action: "rescan",
+          }),
+        ];
+        return '<div class="section">Connection</div><div class="rows">' + rows.slice(0, 4).join("") + "</div>" +
+          '<div class="section">Library</div><div class="rows">' + rows[4] + rows[5] + "</div>";
+      }
+
+      function viewSettings() {
+        var rows = [
+          row({
+            key: "settings:mac",
+            title: "Mac address",
+            desc: S.mac ? "Builds are requested from " + S.mac : "Set the Mac that runs the packer",
+            value: S.mac || "Not set",
+            valueClass: S.mac ? "ok" : "",
+            glyph: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="11" rx="1.6"/><path d="M8.5 19.4h7"/></svg>',
+            chevron: true,
+            action: "editMac",
+          }),
+          row({
+            key: "settings:rescan",
+            title: "Rescan library",
+            desc: "Look for dumps and packages again",
+            glyph: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.6 5.9"/><path d="M20 5.4V12h-6.4"/></svg>',
+            action: "rescan",
+          }),
+          row({
+            key: "settings:version",
+            title: "Version",
+            desc: "Prospero Vault payload",
+            value: "v" + VERSION,
+          }),
+        ];
+        return (
+          '<div class="section">Package building</div><div class="rows">' + rows[0] + "</div>" +
+          '<div class="section">Library</div><div class="rows">' + rows[1] + "</div>" +
+          '<div class="section">About</div><div class="rows">' + rows[2] + "</div>" +
+          '<div class="note">Packing runs on the Mac, because no FPKG packer runs on the console. The console asks it to build, then pulls the finished package into /data/prospero-vault/Games.</div>'
+        );
+      }
+
+      // keepScroll: a poll that refreshes the list must not throw the view back
+      // to the top, which is what made the grid jump while a scan ran.
+      function render(keepScroll) {
+        var top = keepScroll ? scroll.scrollTop : 0;
+        var meta = HEADINGS[S.view] || HEADINGS.library;
+        document.getElementById("crumbs").textContent = meta.crumb;
+        document.getElementById("heading").textContent = meta.title;
+        var foot = document.getElementById("railFoot");
+        if (foot) foot.textContent = "v" + VERSION;
+
+        var items = document.querySelectorAll(".nav .item");
+        for (var i = 0; i < items.length; i++) {
+          items[i].classList.toggle("active", items[i].getAttribute("data-view") === S.view);
+        }
+
+        var views = { library: viewLibrary, packages: viewPackages, console: viewConsole, settings: viewSettings };
+        scroll.innerHTML = (views[S.view] || viewLibrary)();
+        scroll.scrollTop = top;
+        restoreFocus();
+        // The first screen opens with a game selected, the way the PS5 home
+        // does; later polls must not steal focus from wherever the player is.
+        if (!S.landed) {
+          var first = document.querySelector("#scroll [data-focus]:not([disabled])");
+          if (first) {
+            setFocus(first, true);
+            S.landed = true;
+          }
+        }
+      }
+
+      /* ---------------- sheets ---------------- */
+
+      function openSheet(html, focusSelector) {
+        scrim.innerHTML = '<div class="sheet">' + html + "</div>";
+        scrim.hidden = false;
+        S.sheet = true;
+        var target = focusSelector ? scrim.querySelector(focusSelector) : null;
+        // A disabled row cannot take focus: a panel must open on something the
+        // player can actually press.
+        if (!target || target.disabled) {
+          var usable = [].slice.call(scrim.querySelectorAll("[data-focus]")).filter(function (node) {
+            return !node.disabled;
+          });
+          target = usable[0] || null;
+        }
+        setFocus(target, true);
+      }
+
+      function closeSheet() {
+        scrim.hidden = true;
+        scrim.innerHTML = "";
+        S.sheet = null;
+        // A finished job takes its chip with it; a running one keeps it, which
+        // is the way back to Cancel after hiding the panel.
+        if (S.job && S.job.done) {
+          S.job = null;
+          var chip = document.getElementById("jobChip");
+          if (chip) chip.hidden = true;
+        }
+        restoreFocus();
+      }
+
+      // One press on a tile does the obvious thing, the way a system app
+      // behaves: a package plays (installing through the console's own
+      // installer first, which is what puts it on the home screen), and a
+      // folder dump asks before it spends an hour packing.
+      function openItem(id) {
+        var game = null;
+        for (var i = 0; i < S.games.length; i++) if (S.games[i].id === id) game = S.games[i];
+        if (!game) return;
+
+        if (canPlay(game)) {
+          play(id);
+          return;
+        }
+
+        if (game.kind === "image") {
+          openSheet(
+            "<h2>Disc image</h2>" +
+              '<div class="note">A disc image can only be mounted by a payload. Unpack it on the Mac, then convert the folder here.</div>' +
+              '<div class="actions">' +
+              row({ key: "image:ok", title: "OK", action: "close" }) +
+              "</div>",
+            '[data-key="image:ok"]',
+          );
+          return;
+        }
+
+        S.pending = id;
+        openSheet(
+          "<h2>Convert to FPKG?</h2>" +
+            '<div class="note">' + esc(game.name) + " will be packed " +
+            (S.mac ? "on " + esc(S.mac) : "on your Mac (set its address in Settings)") +
+            " and pulled onto this console.</div>" +
+            '<div class="actions">' +
+            row({ key: "confirm:yes", title: "Yes", action: "confirmYes" }) +
+            row({ key: "confirm:no", title: "No", action: "close" }) +
+            "</div>",
+          '[data-key="confirm:yes"]',
+        );
+      }
+
+      function settingsMacSheet() {
+        openSheet(
+          "<h2>Mac address</h2>" +
+            '<div class="id" style="color:#77777f;font-size:11.5px;margin-top:4px">host:port of the app that builds packages</div>' +
+            '<input class="field" id="macField" type="text" placeholder="192.168.4.26:8090" value="' + esc(S.mac) + '">' +
+            '<div class="actions" style="margin-top:18px">' +
+            row({ key: "mac:save", title: "Save", action: "saveMac" }) +
+            row({ key: "mac:cancel", title: "Back", action: "close" }) +
+            "</div>" +
+            '<div class="note">Without this the console can only show what is already on it.</div>',
+          "#macField",
+        );
+        setTimeout(function () {
+          var field = document.getElementById("macField");
+          if (field) field.focus();
+        }, 30);
+      }
+
+      /* ---------------- job ---------------- */
+
+      function jobTitle(job) {
+        var installing = job.kind === "install";
+        if (job.done) {
+          if (!job.ok) return installing ? "Install stopped" : "Conversion stopped";
+          return installing ? "Ready to play" : "Package ready";
+        }
+        return installing ? "Installing" : "Converting";
+      }
+
+      function jobCard(job) {
+        var running = !job.done;
+        // An install cannot be cancelled by the payload, so offering the button
+        // there would be a lie. A long conversion can always be hidden instead.
+        var canCancel = running && job.kind === "convert";
+        return (
+          '<div class="job">' +
+          "<h2>" + esc(jobTitle(job)) + "</h2>" +
+          '<div class="stage" id="jobStage">' + esc(job.message || job.line || "Starting…") + "</div>" +
+          '<div class="bar"><i id="jobBar" style="width:' + Math.max(0, Math.min(100, job.pct || 0)) + '%"></i></div>' +
+          '<div class="foot"><span class="pct" id="jobPct">' + Math.round(job.pct || 0) + "%</span>" +
+          '<span id="jobAction">' +
+          (running
+            ? (canCancel
+                ? '<button class="row" style="width:auto;min-height:34px;margin:0 8px 0 0;padding:0 14px" data-focus data-key="job:cancel" data-action="cancel">Cancel</button>'
+                : "") +
+              '<button class="row" style="width:auto;min-height:34px;margin:0;padding:0 14px" data-focus data-key="job:hide" data-action="hideJob">Hide</button>'
+            : '<button class="row" style="width:auto;min-height:34px;margin:0;padding:0 14px" data-focus data-key="job:close" data-action="close">Close</button>') +
+          "</span></div>" +
+          (running ? '<div class="done">This keeps running if you hide it.</div>' : "") +
+          "</div>"
+        );
+      }
+
+      function showJob() {
+        scrim.innerHTML = jobCard(S.job || { pct: 0, line: "Starting…" });
+        scrim.hidden = false;
+        S.sheet = true;
+        var first = scrim.querySelector("[data-action='cancel']") || scrim.querySelector("[data-focus]");
+        setFocus(first || null, true);
+      }
+
+      // Hiding the panel must not hide the job: the chip keeps it one press away
+      // and the poll keeps running, so a long pack never traps the interface.
+      function dismissJob() {
+        closeSheet();
+        if (S.job) paintJob(S.job);
+      }
+
+      function paintJob(job) {
+        var bar = document.getElementById("jobBar");
+        var pct = document.getElementById("jobPct");
+        var stage = document.getElementById("jobStage");
+        if (bar) bar.style.width = Math.max(0, Math.min(100, job.pct || 0)) + "%";
+        if (pct) pct.textContent = Math.round(job.pct || 0) + "%";
+        if (stage) stage.textContent = job.message || job.line || "Working…";
+
+        var chip = document.getElementById("jobChip");
+        if (chip) {
+          chip.hidden = !job;
+          if (job) {
+            var value = Math.max(0, Math.min(100, job.pct || 0));
+            chip.innerHTML =
+              esc(jobTitle(job)) +
+              "<b>" + Math.round(value) + "%</b>" +
+              '<span class="mini"><i style="width:' + value + '%"></i></span>';
+          }
+        }
+      }
+
+      var jobTimer = null;
+
+      function trackJob() {
+        if (jobTimer) clearInterval(jobTimer);
+        showJob();
+        jobTimer = setInterval(function () {
+          api("GET", "/api/task")
+            .then(function (job) {
+              S.job = job;
+              paintJob(job);
+              if (job.done) {
+                clearInterval(jobTimer);
+                jobTimer = null;
+                showJob();
+                // Success clears itself. A failure stays until it is dismissed:
+                // the reason is the whole point, and three seconds is not
+                // enough to read a sentence across the room.
+                if (job.ok) {
+                  setTimeout(function () {
+                    if (S.sheet) closeSheet();
+                    load();
+                  }, 1800);
+                } else {
+                  load();
+                }
+              }
+            })
+            .catch(function () {
+              clearInterval(jobTimer);
+              jobTimer = null;
+              closeSheet();
+              toast("Lost contact with the payload", true);
+            });
+        }, 700);
+      }
+
+      /* ---------------- actions ---------------- */
+
+      // The list is polled, not streamed. Two things keep it cheap: the payload
+      // tags the body with an ETag, and an identical body paints nothing at all.
+      var pollTimer = null;
+
+      function schedule(delay) {
+        clearTimeout(pollTimer);
+        if (document.hidden) return;  // a background tab polls nothing
+        pollTimer = setTimeout(load, delay);
+      }
+
+      function load() {
+        // The flag keeps a slow answer from stacking polls on top of each other.
+        // It also has to be able to clear itself: a request that never settled
+        // left the list frozen with no way back but a reload.
+        if (load.busy && Date.now() - (load.started || 0) < 12000) return Promise.resolve();
+        load.busy = true;
+        load.started = Date.now();
+
+        var headers = {};
+        if (S.etag) headers["if-none-match"] = S.etag;
+
+        return within(
+          fetch("/api/games", { headers: headers, cache: "no-store" }),
+          10000,
+          "The console stopped answering, so the list paused. Retrying."
+        )
+          .then(function (res) {
+            if (res.status === 304) return null;  // nothing changed since last time
+            if (!res.ok) {
+              // The payload explains itself in JSON; its words beat a bare code.
+              var fallback = "The console answered HTTP " + res.status + ".";
+              return res.text().then(function (raw) {
+                var said = fallback;
+                try {
+                  var parsed = JSON.parse(raw);
+                  if (parsed && (parsed.message || parsed.error)) said = parsed.message || parsed.error;
+                } catch (e) {
+                  /* keep the status */
+                }
+                throw new Error(said);
+              });
+            }
+            var tag = res.headers.get("etag");
+            if (tag) {
+              S.etag = tag;
+              S.rev = tag.replace(/[^a-zA-Z0-9-]/g, "");
+            }
+            return res.text();
+          })
+          .then(function (text) {
+            load.busy = false;
+            if (text === null || text === S.body) {
+              schedule(S.scanning ? 1000 : 6000);
+              return null;
+            }
+
+            S.body = text;
+            S.pollDown = false;
+            var data = JSON.parse(text);
+            S.games = data.games || [];
+            S.mac = data.mac || "";
+            S.scanning = data.scanning === true;
+            S.playing = data.playing === true;
+            var first = !S.loaded;
+            S.loaded = true;
+            render(!first);
+            // Cheap and guarded: a conversion started from the Mac side should
+            // still take over the screen here, without reopening the sheet.
+            resumeJob();
+            // Fast while a scan is filling the grid, slow once it has settled.
+            schedule(S.scanning ? 1000 : 6000);
+            return null;
+          })
+          .catch(function (error) {
+            load.busy = false;
+            var why = error && error.message ? error.message : "";
+            if (!S.loaded) {
+              scroll.innerHTML =
+                '<div class="empty"><b>Cannot reach the payload</b>' +
+                (why ? esc(why) + " " : "") +
+                "Reload this page once it is running again.</div>";
+            } else if (!S.pollDown) {
+              // Tiles stay on screen, but the player is told they are not live:
+              // a list that silently stops updating looks like a working one.
+              S.pollDown = true;
+              toast(why || "The console stopped answering. Showing what it last sent.", true);
+            }
+            schedule(8000);
+            return null;
+          });
+      }
+
+      function loadHealth() {
+        if (document.hidden) return Promise.resolve();
+        return api("GET", "/api/health")
+          .then(function (data) {
+            S.health = data;
+            // keepScroll: storage and clock refresh silently, without yanking
+            // the library back to the first row underneath the player.
+            if (S.view === "console" || S.view === "library") render(true);
+          })
+          .catch(function () {
+            /* the health probe is optional */
+          });
+      }
+
+      function convert(id) {
+        api("POST", "/api/convert", { id: id })
+          .then(function () {
+            S.job = { active: true, done: false, ok: false, kind: "convert", id: id, pct: 1, line: "starting", message: "" };
+            closeSheet();
+            trackJob();
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
+      function play(id) {
+        api("POST", "/api/play", { id: id })
+          .then(function (data) {
+            // 202: the console accepted the package and installs it first.
+            if (data && data.installing) {
+              S.job = {
+                active: true, done: false, ok: false, kind: "install", id: id,
+                pct: 2, line: "starting", message: data.message || "",
+              };
+              closeSheet();
+              trackJob();
+              return;
+            }
+            if (data && data.message) toast(data.message);
+            S.playing = true;
+            load();
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
+      function rescan() {
+        toast("Scanning the console…");
+        api("POST", "/api/scan")
+          .then(function (data) {
+            if (data && data.deferred) {
+              toast(data.message || "A scan is already running.");
+              S.scanning = true;
+              schedule(600);
+              return;
+            }
+            // The payload claims the walk and answers at once; the grid fills
+            // in from the poll instead of holding this request open for it.
+            if (data && data.games) {
+              S.games = data.games;
+              S.scanning = data.scanning === true;
+              render(true);
+            } else {
+              S.scanning = true;
+            }
+            schedule(600);
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
+      // One row, two jobs: add the tile, or take it away again. Pressing a row
+      // that is already installed asks first, the way every other destructive
+      // step in this interface does.
+      function homeAppMenu() {
+        if (homeAppState() === "off") {
+          installHomeApp();
+          return;
+        }
+        openSheet(
+          "<h2>Remove from the home screen?</h2>" +
+            '<div class="note">The tile is deleted and stays gone. This window keeps running until you ' +
+            "close it.</div>" +
+            '<div class="actions" style="margin-top:18px">' +
+            row({ key: "home:yes", title: "Yes", action: "homeAppRemove" }) +
+            row({ key: "home:no", title: "No", action: "close" }) +
+            "</div>",
+          '[data-key="home:yes"]',
+        );
+      }
+
+      // The app installs itself: a tile in the app row, opening this interface
+      // full screen. Nothing is downloaded and nothing is signed — the payload
+      // writes the folder the console's home screen reads.
+      function installHomeApp() {
+        toast("Adding Prospero Vault to the home screen…");
+        api("POST", "/api/home-app", {})
+          .then(function (data) {
+            toast((data && data.message) || "Done.", false);
+            loadHealth();
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
+      function removeHomeApp() {
+        api("POST", "/api/home-app/remove", {})
+          .then(function (data) {
+            closeSheet();
+            toast((data && data.message) || "Removed.");
+            loadHealth();
+          })
+          .catch(function (error) {
+            closeSheet();
+            toast(error.message, true);
+          });
+      }
+
+      function cancelJob() {
+        api("POST", "/api/convert/cancel", {})
+          .then(function () {
+            toast("Stopping…");
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
+      function saveMac() {
+        var field = document.getElementById("macField");
+        var value = field ? field.value.trim() : "";
+        api("POST", "/api/config", { mac: value })
+          .then(function () {
+            S.mac = value;
+            closeSheet();
+            render();
+            toast(value ? "Mac set to " + value : "Mac address cleared");
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
+      function resumeJob() {
+        if (S.job && S.job.active) return;  // already tracking it
+        api("GET", "/api/convert/status")
+          .then(function (job) {
+            if (job.active) {
+              S.job = job;
+              trackJob();
+            }
+          })
+          .catch(function () {
+            /* nothing to resume */
+          });
+      }
+
+      /* ---------------- wiring ---------------- */
+
+      document.addEventListener("click", function (event) {
+        var nav = event.target.closest(".nav .item");
+        if (nav) {
+          S.view = nav.getAttribute("data-view");
+          render();
+          // On PS5 a tab change hands focus to the content, not to the tab.
+          // Up from the first row walks back into the icon row.
+          var first = document.querySelector("#scroll [data-focus]:not([disabled])");
+          if (first) setFocus(first, true);
+          return;
+        }
+
+        var chip = event.target.closest("#jobChip");
+        if (chip) {
+          showJob();
+          return;
+        }
+
+        var tile = event.target.closest(".tile[data-id]");
+        if (tile) {
+          openItem(tile.getAttribute("data-id"));
+          return;
+        }
+
+        var action = event.target.closest("[data-action]");
+        if (action) {
+          var name = action.getAttribute("data-action");
+          var id = action.getAttribute("data-id");
+          if (name === "convert") convert(id);
+          else if (name === "confirmYes") convert(S.pending);
+          else if (name === "play") play(action.getAttribute("data-id"));
+          else if (name === "close") closeSheet();
+          else if (name === "cancel") cancelJob();
+          else if (name === "hideJob") dismissJob();
+          else if (name === "rescan") rescan();
+          else if (name === "homeApp") homeAppMenu();
+          else if (name === "homeAppRemove") removeHomeApp();
+          else if (name === "editMac") settingsMacSheet();
+          else if (name === "saveMac") saveMac();
+          else if (name === "settings") {
+            S.view = "settings";
+            S.focus = "settings";
+            render();
+          }
+          return;
+        }
+
+        if (event.target === scrim) closeSheet();
+      });
+
+      document.addEventListener("keydown", function (event) {
+        if (event.target && event.target.tagName === "INPUT") {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            saveMac();
+          } else if (event.key === "Escape") {
+            closeSheet();
+          }
+          return;
+        }
+
+        var key = event.key;
+        if (key === "ArrowRight") { event.preventDefault(); moveFocus(1, 0); }
+        else if (key === "ArrowLeft") { event.preventDefault(); moveFocus(-1, 0); }
+        else if (key === "ArrowDown") { event.preventDefault(); moveFocus(0, 1); }
+        else if (key === "ArrowUp") { event.preventDefault(); moveFocus(0, -1); }
+        else if (key === "Enter" || key === " ") { event.preventDefault(); activate(); }
+        else if (key === "Escape") {
+          if (S.sheet) closeSheet();
+          else if (S.view !== "library") { S.view = "library"; render(); }
+        } else if (key === "r" || key === "R") {
+          rescan();
+        }
+      });
+
+      // Controller: the console browser exposes the pad through the Gamepad API.
+      var padLast = 0;
+      var padHeld = {};
+      function pollPad() {
+        // A background tab does no work: while a game runs, its frame time
+        // belongs to the game and not to a menu nobody can see.
+        if (document.hidden) { requestAnimationFrame(pollPad); return; }
+        var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+        var pad = pads && pads[0];
+        if (pad) {
+          var now = performance.now();
+          var directions = [
+            { button: 12, dx: 0, dy: -1 },
+            { button: 13, dx: 0, dy: 1 },
+            { button: 14, dx: -1, dy: 0 },
+            { button: 15, dx: 1, dy: 0 },
+          ];
+          for (var i = 0; i < directions.length; i++) {
+            var d = directions[i];
+            if (pad.buttons[d.button] && pad.buttons[d.button].pressed && now - padLast > 190) {
+              moveFocus(d.dx, d.dy);
+              padLast = now;
+            }
+          }
+          var ax = pad.axes[0] || 0;
+          var ay = pad.axes[1] || 0;
+          if (now - padLast > 210) {
+            if (ax > 0.65) { moveFocus(1, 0); padLast = now; }
+            else if (ax < -0.65) { moveFocus(-1, 0); padLast = now; }
+            else if (ay > 0.65) { moveFocus(0, 1); padLast = now; }
+            else if (ay < -0.65) { moveFocus(0, -1); padLast = now; }
+          }
+          if (pad.buttons[0] && pad.buttons[0].pressed && !padHeld[0]) { activate(); padHeld[0] = true; }
+          if (pad.buttons[0] && !pad.buttons[0].pressed) padHeld[0] = false;
+          if (pad.buttons[1] && pad.buttons[1].pressed && !padHeld[1]) {
+            if (S.sheet) closeSheet();
+            padHeld[1] = true;
+          }
+          if (pad.buttons[1] && !pad.buttons[1].pressed) padHeld[1] = false;
+        }
+        requestAnimationFrame(pollPad);
+      }
+
+      function tickClock() {
+        var now = new Date();
+        var hours = now.getHours();
+        var minutes = now.getMinutes();
+        document.getElementById("clock").textContent =
+          (hours < 10 ? "0" : "") + hours + ":" + (minutes < 10 ? "0" : "") + minutes;
+      }
+
+      // Returning to the page refreshes at once instead of waiting out the
+      // slow poll, so the library is never visibly stale.
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) load();
+      });
+
+      load();
+      loadHealth();
+      setInterval(loadHealth, 15000);
+      tickClock();
+      setInterval(tickClock, 20000);
+      requestAnimationFrame(pollPad);
+    </script>
+  </body>
+</html>

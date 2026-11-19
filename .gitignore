@@ -1,0 +1,8 @@
+data/
+console/build/
+node_modules/
+.DS_Store
+*.log
+packer/bin/
+packer/obj/
+packer/.deps/

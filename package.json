@@ -1,0 +1,19 @@
+{
+  "name": "prospero-vault",
+  "version": "0.11.0",
+  "private": true,
+  "description": "Prospero Vault \u2014 a console-native library that packages PS5 game dumps into debug FPKGs and keeps them on a jailbroken PS5.",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run app/server.ts",
+    "start": "bun run app/server.ts",
+    "preview": "bun run tools/preview-console-ui.ts",
+    "test": "bun run tools/selftest.ts",
+    "check:payload": "bash tools/payload-check.sh",
+    "check:pipeline": "bun run tools/pipeline-check.ts",
+    "check:ui": "bun run tools/ui-flow.ts"
+  },
+  "engines": {
+    "bun": ">=1.1"
+  }
+}

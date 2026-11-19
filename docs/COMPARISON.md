@@ -1,0 +1,71 @@
+# How Prospero Vault compares
+
+Two tools solve the same first problem — get a game onto a jailbroken PS5 and
+give it a tile on the home screen — from opposite directions.
+
+* **Prospero Vault** turns a dump into a real debug FPKG on a Mac, installs it
+  through the console's own installer, and then launches the installed title.
+* **Kraken Mount** (quer3q, GPL-3.0, v0.3.0) never installs: it mounts a debug
+  FPKG or a game folder from wherever it lives (internal SSD, M.2, USB) and
+  registers a tile that launches from the source, with a per-game cache on the
+  internal SSD.
+
+Both are legitimate answers. The difference is what you pay and what you get.
+
+| | Prospero Vault | Kraken Mount v0.3.0 |
+| --- | --- | --- |
+| Where the game runs from | Installed into the console's own storage through Sony's installer | Mounted from its source (internal, M.2, USB) |
+| Disk cost | One copy of the package | Cache only; the source stays where it is |
+| Formats | Game folders, `.exfat`, `.ffpfsc`, `.ffpfs`, `.ffpkg`, `.gp5`, debug `.pkg`, existing installed apps | Debug FPKG, plain folder, zstd folder, LZ4 folder |
+| Building a package | Yes — fpkg-cli, orbis-pub-cmd, LibProsperoPkg, or a custom command, with AC/DLC packing | No — it mounts what already exists; sparse-extent PKGs must be repacked (`--kraken stored`) |
+| A dump that lives only on the console | Pulled to the Mac with a resumable, byte-verified transfer, then built | Mounted directly, no copy |
+| Scanning | Paths you choose, plus what the console reports from `/data`, `/user/data` and USB | Fixed roots, zero config: `/data/homebrew`, `/data/etaHEN/games`, drive roots, USB |
+| Interface | Console-native page served by the payload, plus a desktop app for the library | Web UI on the console |
+| DLC and PlayGo | Packed by `acpack` when you build | Bundled `dlc_emu` and `pgo_stub`, added automatically |
+| Saves and trophies | Untouched — the installed title uses the console's own modules | v0.3.0 stopped shadowing `libSceSaveData` after saves went missing (#64, #68) |
+| Failure reporting | Every failure carries a sentence and a name; simulated builds are labelled and refused by the console | Log lines and a title that does not appear |
+| Verification | 68 payload checks (plus ASan/UBSan), 123 self-checks, 42 pipeline checks, 57 browser checks | Build is checked in CI; behaviour is verified by hand |
+| Requirements | kstuff + elfldr, a Mac with a packer | kstuff, ShadowMount+ stopped |
+
+## Where Kraken Mount is ahead, honestly
+
+* **No copy, no wait.** A 60 GB game launches from the drive it already sits on.
+  Installing the same game costs 60 GB of console storage and the time to write it.
+* **Zero-configuration discovery.** It knows the usual roots. Ours asks you to
+  point at a folder the first time.
+* **Compressed folders.** zstd and LZ4 folder dumps are read directly; we only
+  take them uncompressed.
+* **DLC and PlayGo emulators bundled.** We can pack AC/DLC from a Mac, but the
+  console side does not ship emulators.
+
+## Where Prospero Vault is ahead
+
+* **It can make the package at all.** A dump is not playable as-is; something has
+  to build it. Kraken Mount mounts a debug FPKG and refuses the third-party
+  layouts it cannot read.
+* **It installs and launches through Sony's own paths**, then keeps the result in
+  a library with state, notes and a package on disk you can copy anywhere.
+* **Transfers that survive a real Wi-Fi link.** Range resume with a stall
+  watchdog, byte-identical verification and a bounded retry budget (see
+  `README.md`, "A dump that lives only on the console").
+* **Failures you can read.** A build that produced a placeholder says so and the
+  console refuses to install it. A save that could not be written says so on the
+  title and in a pill. Nothing is reported as progress after it stopped.
+* **The interface matches the console** — icon row, focus ring, D-pad — instead
+  of a web page styled like a dashboard.
+
+## What we are closing next
+
+1. **Zero-config discovery on the Mac** — offer `~/Downloads`, `~/Desktop` and
+   mounted volumes as one-tap scan roots, so the first run asks for less.
+2. **Compressed folder dumps** (zstd, LZ4) on the pull path, so a packed dump on
+   the console can be pulled and repacked instead of refused.
+3. **Send and launch in one press** — the console already installs then starts a
+   package from one tap; the desktop app should hand off with the same intent.
+
+Mounting without installing stays out of scope on purpose: it is a different
+product with a different trade-off, and doing both badly would be worse than
+doing one of them well.
+
+*This comparison reflects Kraken Mount v0.3.0 (18 November 2026). If it moves,
+this page should move with it.*
