@@ -486,10 +486,13 @@ Verified on this Mac:
   real API contract: rail, hero, tiles, detail sheet, progress modal
 - a full conversion from the new UI: `202` → progress steps → package pulled →
   `.pkg` tile appeared (the mock engine, so the package is a placeholder)
-- the Mac app's own suite: `bun run test` — 237 checks covering discovery, real
+- the Mac app's own suite: `bun run test` — 247 checks covering discovery, real
   `param.sfo` parsing, build, serving, `Range` resume, deploy, a 60-cycle soak,
-  and a mixed good/bad dump soak across a restart, and that a build leaves no
-  temporary files or scratch folder behind
+  a mixed good/bad dump soak across a restart, the cross-site guard, loopback
+  binding, and that a build leaves no temporary files or scratch folder behind
+- `bun run check:app` — 16 checks: the built bundle launched with no Bun or
+  dotnet on PATH, serving API and UI, rejecting cross-origin mutations, building
+  a real package, and refusing off-host connections in loopback mode
 - `bun run check:gate` — 43 checks: the real payload built for this Mac on the
   LAN, preflight passing with all 14 lines, both delivery paths building
   byte-identical packages, each new precondition broken in turn with no job
@@ -833,26 +836,102 @@ with a very slow blue-grey drift, drawn as two composited gradient layers. Sony'
 own asset is not redistributable and is not sampled here; this reproduces the
 motion and tone, not the exact artwork, and it freezes under reduced-motion.
 
-### Still open
+## Install the Mac companion
 
-- No packer is chosen by default, so a build runs the simulated placeholder
-  until one is. `acpack` does run here — it is the .NET packer in `packer/`, and
-  `dotnet` 10 executes it on this Mac — so Settings' custom command can point at
-  it: `dotnet packer/bin/Release/net10.0/acpack.dll build --source {source}
-  --output {output}`. What that produces is a real debug package, but installing
-  one has still never been tried on hardware.
-- Patches are not built (see the table).
-- The install and launch paths have never run on hardware.
-- Neither port has authentication; that is a deliberate home-network assumption
-  recorded above, not an oversight.
-- The app's own tile has never been registered on hardware. It needs
-  ShadowMountPlus running, and the web-app shell at
-  `/system_ex/app/NPXS40106/eboot.bin` — a path that can differ by firmware, so
-  `"shellEboot"` in `config.json` names another one without a rebuild. If the
-  shell is missing the tile is still written but will not start, and the console
-  screen says exactly that instead of leaving a dead icon.
-- Registration is confirmed, but a *launch* cannot be: whether this console's
-  shell honours `deeplinkUri` from a folder registration is the assumption the
-  whole tile rests on, and only pressing it on a real console answers that.
-- The deeplink is `127.0.0.1`, so the tile opens the interface only from the
-  console itself. Reaching it from another device is still the LAN URL.
+The Mac side ships as a menu bar app with its own runtime and packer, so a
+person needs neither Bun nor .NET:
+
+```bash
+./tools/build-app.sh          # or: bun run build:app
+open "build/Prospero Vault.app"
+```
+
+The build produces `build/Prospero Vault.app` (about 140 MB: Bun, the
+self-contained `acpack`, the server and the UI). It needs macOS with the Xcode
+command line tools; the first build may take a minute while the packer is
+published.
+
+To distribute a signed copy, set the environment before building — each step is
+skipped cleanly when its variables are absent:
+
+```bash
+DEVELOPER_ID_APPLICATION="Developer ID Application: Name (TEAMID)" \
+NOTARY_PROFILE="notary-profile" \
+./tools/build-app.sh
+```
+
+`APPLE_ID` + `APPLE_TEAM_ID` + `APPLE_APP_PASSWORD` work instead of
+`NOTARY_PROFILE`. Without them the app is ad-hoc signed and runs on the Mac that
+built it.
+
+### First run
+
+1. Drag the app to `/Applications` and double-click it. A **PV** item appears in
+   the menu bar; there is no Dock icon.
+2. It starts the same server the repo runs, on `:8090`, and keeps it alive while
+   the app is open. The data folder is
+   `~/Library/Application Support/Prospero Vault/data`; settings, the library
+   and packages live there, not in the repo.
+3. **Open Prospero Vault** opens `http://127.0.0.1:8090/` in the browser.
+   **Launch at Login** writes a login item (`com.prospero.vault`) pointing at
+   this app; **Show Log** opens `~/Library/Logs/Prospero Vault.log`; **Quit**
+   stops the server it started.
+4. Find this Mac's address with `ipconfig getifaddr en0` (usually
+   `192.168.4.26`). Put `192.168.4.26:8090` into the console's Settings, or let
+   the first package send teach it.
+
+Firewall: macOS may ask whether to allow incoming connections for the app the
+first time. Allow it, or the console can reach the Mac in one direction only —
+`bun run preflight` reports that as `reachability: console → Mac … did not
+answer the console`.
+
+If the console is not being used at all, set `"bind": "loopback"` in
+`~/Library/Application Support/Prospero Vault/data/config.json` (or launch with
+`PV_BIND=loopback`). The UI then works on this Mac and the server refuses every
+off-host connection, including the console's.
+
+### Security on the LAN
+
+Mutating requests (`POST`/`DELETE` to import, build, deploy, settings, scan and
+delete) are refused with `403` when a browser sends them from another origin;
+reads stay open, and the console payload — a native client that sends no
+`Origin` — keeps working. There is no shared secret between the two halves: the
+payload's contract has no field to carry one, so adding a token would break the
+path already proven on this network. Treat the pair as trusted-LAN software: do
+not port-forward either port, and use `"bind": "loopback"` when the console is
+not involved.
+
+### If something is wrong
+
+- **Menu says "Not running — open the log"**: open the log from the menu; a
+  port already in use is the usual cause (`lsof -nP -iTCP:8090 -sTCP:LISTEN`).
+  Quit the other copy, then reopen.
+- **The UI works locally but the console cannot build**: check the firewall
+  allows the app's incoming connections, and that the console's Settings hold
+  this Mac's current LAN address.
+- **The Mac cannot reach the console**: `bun run preflight --dump <dump>
+  --console <console>` names the direction that failed; the payload must be
+  loaded and listening on `:8097`.
+- **A build fails**: the job's card shows the packer's own sentence. The log has
+  the full command output.
+- **Sending this for support**: `~/Library/Logs/Prospero Vault.log`,
+  `~/Library/Application Support/Prospero Vault/data/last-gate.json`, the
+  `bun run preflight` output, and the console's `/data/prospero-vault/payload.log`.
+
+### What the app check proves
+
+`bun run check:app` boots the built bundle with `PATH=/usr/bin:/bin` (no Bun, no
+dotnet), and verifies: it serves `/api/state` and the console UI, reports its
+bundled packer as the engine, rejects a cross-origin mutation with `403` while
+accepting the same-origin and native ones, imports and builds a retail-shaped
+dump into a real `\x7FFIH` package, and in `PV_BIND=loopback` mode answers on
+`127.0.0.1` while refusing the LAN address. The menu bar item itself needs a
+human to click; it is not covered by that check.
+
+### Still hardware-only
+
+- Install and launch of a package have never run on a PS5.
+- The home-screen tile's `deeplinkUri` launch has never been pressed on a
+  console; the shell path can differ by firmware (`"shellEboot"`).
+- DLC acceptance and `.exfat` image mounting are unproven on hardware.
+- Patches (`gp`) are deliberately not built.

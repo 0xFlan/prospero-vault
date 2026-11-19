@@ -86,10 +86,21 @@ export async function sweepWorkbench(outDir: string): Promise<number> {
  * used, and the settings screen says where it came from. A configured command
  * always wins.
  */
+/**
+ * The bundled packer is either a self-contained executable (what the .app
+ * ships, so no .NET install is needed) or the dll that runs through the dotnet
+ * on PATH (what a plain checkout builds). The apphost beside the dll cannot
+ * find a Homebrew dotnet on macOS, so the dll is never executed directly.
+ */
 export function bundledAcpack(): string | null {
-  // The apphost next to the dll cannot find a Homebrew dotnet on macOS (no
-  // DOTNET_ROOT), so the dll is run through the dotnet that is on PATH.
-  const dll = join(ROOT, "packer", "bin", "Release", "net10.0", "acpack.dll");
+  const dir = join(ROOT, "packer", "bin", "Release", "net10.0");
+  const native = join(dir, "acpack");
+  // `dotnet build` also writes an apphost named acpack, but it needs a .NET
+  // runtime and DOTNET_ROOT to launch; only the self-contained publish (which
+  // carries the runtime dlls beside it) can be run directly.
+  const selfContained = existsSync(join(dir, "System.Private.CoreLib.dll"));
+  if (existsSync(native) && selfContained) return native;
+  const dll = join(dir, "acpack.dll");
   if (!existsSync(dll) || !which("dotnet")) return null;
   return dll;
 }
@@ -97,9 +108,11 @@ export function bundledAcpack(): string | null {
 export function commandTemplate(cfg: Config): string {
   const own = cfg.enginePaths.command?.trim();
   if (own) return own;
-  const dll = bundledAcpack();
+  const packer = bundledAcpack();
+  if (!packer) return "";
+  if (!packer.endsWith(".dll")) return `"${packer}" build --source "{source}" --output "{output}"`;
   const dotnet = which("dotnet");
-  return dll && dotnet ? `"${dotnet}" "${dll}" build --source "{source}" --output "{output}"` : "";
+  return dotnet ? `"${dotnet}" "${packer}" build --source "{source}" --output "{output}"` : "";
 }
 
 export function probeEngines(cfg: Config): EngineStatus[] {
@@ -124,7 +137,9 @@ export function probeEngines(cfg: Config): EngineStatus[] {
       detail: command
         ? ownCommand
           ? "Configured. Placeholders: {source} {titleId} {output} {pkg}"
-          : `Using the bundled packer at ${bundledAcpack()} (run with dotnet)`
+          : bundledAcpack()?.endsWith(".dll")
+            ? `Using the bundled packer at ${bundledAcpack()} (run with dotnet)`
+            : `Using the bundled packer at ${bundledAcpack()}`
         : "No command configured. Use this for orbis-pub-cmd, LibProsperoPkg or your own packer.",
       simulated: false,
     },

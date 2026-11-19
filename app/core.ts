@@ -22,6 +22,12 @@ export type Config = {
     command?: string;
   };
   scanDirs: string[];
+  /**
+   * "all" is the shipped default because the console fetches packages over the
+   * LAN; it is reported in /api/state so it is a visible choice, and
+   * "loopback" keeps the console out entirely for a Mac used only via its UI.
+   */
+  bind: "all" | "loopback";
 };
 
 export const DEFAULTS: Config = {
@@ -30,6 +36,7 @@ export const DEFAULTS: Config = {
   engine: "auto",
   enginePaths: {},
   scanDirs: [],
+  bind: "all",
 };
 
 export async function ensureDirs(): Promise<void> {
@@ -116,6 +123,9 @@ function normaliseConfig(parsed: unknown): { config: Config; ignored: string[] }
     if (dirs.length !== row.scanDirs.length) ignored.push("scanDirs");
     config.scanDirs = dirs;
   } else if (row.scanDirs !== undefined) ignored.push("scanDirs");
+
+  if (row.bind === "all" || row.bind === "loopback") config.bind = row.bind;
+  else if (row.bind !== undefined) ignored.push("bind");
 
   return { config, ignored };
 }

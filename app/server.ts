@@ -514,8 +514,12 @@ async function state(): Promise<Response> {
       engine: config.engine,
       enginePaths: config.enginePaths,
       scanDirs: config.scanDirs,
+      bind: config.bind,
     },
-    lan: `http://${lanAddress()}:${config.port}`,
+    /** What this process is actually bound to, which env can override. */
+    bind: activeBind,
+    listen: serverHostname ?? "0.0.0.0",
+    lan: activeBind === "loopback" ? `http://127.0.0.1:${server.port}` : `http://${lanAddress()}:${server.port}`,
     pkgDir: PKG_DIR,
     // Said out loud rather than silently swallowed: a file that could not be
     // read looks exactly like the app forgetting the user's settings.
@@ -530,8 +534,42 @@ async function state(): Promise<Response> {
   });
 }
 
+const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * A browser on any other site can POST to a localhost server, and this app has
+ * endpoints that build, delete and install. Requests a browser makes carry an
+ * Origin; it must match the Host the request was sent to. The console payload
+ * sends no Origin and is a native client, so it keeps working — its channel is
+ * limited by bind mode and the LAN, not by a browser rule it cannot satisfy.
+ */
+function crossSite(req: Request): Response | null {
+  if (!MUTATING.has(req.method)) return null;
+  const origin = req.headers.get("origin");
+  const site = req.headers.get("sec-fetch-site");
+  const host = req.headers.get("host");
+  const refused = bad(
+    "This request came from another site or app. Use Prospero Vault's own window, or a native client on this network.",
+    403,
+  );
+  if (site === "cross-site") return refused;
+  if (!origin) return null;
+  if (origin === "null") return refused;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return refused;
+  }
+  if (!host || parsed.host.toLowerCase() !== host.toLowerCase()) return refused;
+  return null;
+}
+
 async function handle(req: Request, url: URL): Promise<Response> {
   const { pathname } = url;
+
+  const foreign = crossSite(req);
+  if (foreign) return foreign;
 
   // A body larger than any request this app accepts is refused up front, so a
   // stray upload cannot be buffered in memory and turned into a 500.
@@ -900,6 +938,10 @@ async function handle(req: Request, url: URL): Promise<Response> {
     if (Array.isArray(payload.scanDirs)) {
       next.scanDirs = payload.scanDirs.filter((entry): entry is string => typeof entry === "string");
     }
+    if (payload.bind !== undefined) {
+      if (payload.bind !== "all" && payload.bind !== "loopback") return bad("Binding must be \"all\" or \"loopback\".");
+      next.bind = payload.bind;
+    }
     config = next;
     try {
       await saveConfig(config);
@@ -1150,8 +1192,16 @@ if (!config.scanDirs.length) {
 
 const port = Number(process.env.PV_PORT ?? process.env.TITAN_PORT ?? config.port) || config.port;
 
+// "all" is the explicit default (the console fetches packages over the LAN);
+// PV_BIND or config.bind switches to loopback only. The environment wins so a
+// test or a launcher can pin it without editing the user's settings file.
+const wantedBind = process.env.PV_BIND ?? config.bind;
+const activeBind = wantedBind === "loopback" ? "loopback" : "all";
+const serverHostname = activeBind === "loopback" ? "127.0.0.1" : "0.0.0.0";
+
 const server = Bun.serve({
   port,
+  hostname: serverHostname,
   async fetch(req) {
     const url = new URL(req.url);
     try {
@@ -1172,7 +1222,7 @@ const server = Bun.serve({
   },
 });
 
-const lan = `http://${lanAddress()}:${server.port}`;
+const lan = activeBind === "loopback" ? `http://127.0.0.1:${server.port}` : `http://${lanAddress()}:${server.port}`;
 console.log(`
   PROSPERO VAULT ${VERSION}
   ─────────────────────────────────────────

@@ -8,13 +8,15 @@
     "dev": "bun run app/server.ts",
     "start": "bun run app/server.ts",
     "preview": "bun run tools/preview-console-ui.ts",
-    "test": "bun run tools/selftest.ts && bun run tools/gate-check.ts",
+    "test": "bun run tools/selftest.ts && bun run tools/gate-check.ts && bun run tools/app-check.ts",
     "check:payload": "bash tools/payload-check.sh",
     "check:pipeline": "bun run tools/pipeline-check.ts",
     "check:dumps": "bun run tools/dump-check.ts",
     "preflight": "bun run tools/preflight.ts",
     "check:gate": "bun run tools/gate-check.ts",
-    "check:ui": "bun run tools/ui-flow.ts"
+    "check:ui": "bun run tools/ui-flow.ts",
+    "check:app": "bun run tools/app-check.ts",
+    "build:app": "./tools/build-app.sh"
   },
   "engines": {
     "bun": ">=1.1"

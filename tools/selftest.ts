@@ -1949,6 +1949,67 @@ async function main(): Promise<void> {
     atomic3.child.kill();
   }
 
+  /* ---------------- cross-site guard and bind mode ---------------- */
+
+  const guard = await bootApp(
+    "guard",
+    JSON.stringify({ port: 8136, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+    null,
+    8136,
+  );
+  const guardHost = "http://127.0.0.1:8136";
+  const guardPost = (origin: string | null, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${guardHost}/api/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(origin ? { origin } : {}), ...headers },
+      body: JSON.stringify(body),
+    });
+  try {
+    const evil = await guardPost("http://evil.example", { items: [{ titleId: "PGUARD001", title: "Evil", path: FIXTURE, kind: "Game folder", size: 0 }] });
+    check("a cross-origin mutation is refused", evil.status === 403, String(evil.status));
+    const stillThere = await fetch(`${guardHost}/api/state`);
+    const noEvil = (await stillThere.json()) as any;
+    check("and it changed nothing", !noEvil.games.some((game: any) => game.titleId === "PGUARD001"));
+
+    const same = await guardPost(`${guardHost}`, { items: [{ titleId: "PGUARD002", title: "Same", path: FIXTURE, kind: "Game folder", size: 0 }] });
+    check("a same-origin mutation still succeeds", same.status === 200, String(same.status));
+
+    const native = await guardPost(null, { items: [{ titleId: "PGUARD003", title: "Native", path: FIXTURE, kind: "Game folder", size: 0 }] });
+    check("a native client with no Origin still works", native.status === 200, String(native.status));
+
+    const forge = await guardPost(null, { items: [{ titleId: "PGUARD004", title: "Forge", path: FIXTURE, kind: "Game folder", size: 0 }] }, { "sec-fetch-site": "cross-site" });
+    check("a browser declares cross-site even without Origin", forge.status === 403, String(forge.status));
+
+    const read = await fetch(`${guardHost}/api/state`, { headers: { origin: "http://evil.example" } });
+    check("reads keep working from anywhere", read.status === 200, String(read.status));
+  } finally {
+    guard.child.kill();
+  }
+
+  const loop = await bootApp(
+    "loopback",
+    JSON.stringify({ port: 8137, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [], bind: "loopback" }),
+    null,
+    8137,
+  );
+  try {
+    const loopState = loop.state as any;
+    check("loopback mode is reported", loopState.bind === "loopback" && loopState.listen === "127.0.0.1", `${loopState.bind}/${loopState.listen}`);
+    check("loopback answers on 127.0.0.1", (await fetch("http://127.0.0.1:8137/api/state")).status === 200);
+    const lanHost =
+      Bun.spawnSync(["ipconfig", "getifaddr", "en0"]).stdout.toString().trim() || "192.168.4.26";
+    let offHost = true;
+    try {
+      offHost = !(await fetch(`http://${lanHost}:8137/api/state`, { signal: AbortSignal.timeout(2000) })).ok;
+    } catch {
+      offHost = true;
+    }
+    check("loopback refuses the LAN address", offHost, lanHost);
+    check("the interface is still served on loopback", (await fetch("http://127.0.0.1:8137/")).status === 200);
+  } finally {
+    loop.child.kill();
+  }
+
   /* ---------------- front 2: a long soak ---------------- */
   const soak = await bootApp(
     "soak",
