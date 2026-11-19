@@ -953,7 +953,7 @@
       function packInstallNote() {
         var state = installState();
         if (state === "blocked") {
-          return "This firmware cannot install the result: public support stops at 11.60 and the installer returns 0x80BD0005. It can still be packed and kept for a console with support.";
+          return "This firmware is outside the public install range (through 11.60). The tested 13.20 machine returns 0x80BD0005, so it can still be packed and kept, but not installed here.";
         }
         if (state === "unavailable") {
           return "This firmware has no public exploit, so the result cannot be installed here.";

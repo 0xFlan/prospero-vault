@@ -553,8 +553,9 @@ void install_capability(char* state, std::size_t state_cap, char* reason, std::s
   } else if (g_firmware_code <= 1360) {
     std::snprintf(state, state_cap, "blocked");
     std::snprintf(reason, reason_cap,
-                  "Public kstuff/ppr-patch support for debug-package installs stops at 11.60. On %s the "
-                  "console's installer returns 0x80BD0005, so mount the dump or image instead.",
+                  "Public kstuff/ppr-patch support for debug-package installs stops at 11.60. This console "
+                  "reports %s, outside that range, so a debug-package install is expected to fail; the tested "
+                  "13.20 machine returns 0x80BD0005. Mount the dump or image instead.",
                   g_firmware);
   } else {
     std::snprintf(state, state_cap, "unavailable");
