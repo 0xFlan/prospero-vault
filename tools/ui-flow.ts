@@ -435,6 +435,47 @@ try {
     await send("Page.navigate", { url: `http://127.0.0.1:${APP_PORT}/` });
     await sleep(800);
 
+    // First run: an empty library must teach, not dead-end.
+    const firstRun = String(await evaluate(`document.getElementById("content").textContent`));
+    check(
+      "a first run shows the three steps",
+      /Three steps to a game on your PS5/.test(firstRun),
+      firstRun.replace(/\s+/g, " ").slice(0, 70),
+    );
+    check("a first run says the console is not linked yet", /No console linked yet/.test(firstRun));
+
+    // The Console view carries the exact loader command for the saved address.
+    await fetch(`http://127.0.0.1:${APP_PORT}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ consoleHost: "127.0.0.1:8199" }),
+    });
+    await evaluate(`document.querySelector('.nav[data-view="console"]').click()`);
+    await sleep(600);
+    const loader = String(
+      await evaluate(`(() => { const b = document.querySelector("#copySend"); return b ? b.dataset.send : ""; })()`),
+    );
+    check(
+      "the console view shows the loader command",
+      /^nc -w 3 127\.0\.0\.1 9021 < prospero-vault\.elf$/.test(loader),
+      loader,
+    );
+    await evaluate(`document.querySelector("#copySend")?.click()`);
+    await sleep(400);
+    const copyToast = String(
+      await evaluate(`document.getElementById("toast").hidden ? "" : document.getElementById("toast").textContent`),
+    );
+    check(
+      "copying the loader command answers visibly",
+      /Command copied|nc -w 3/.test(copyToast),
+      copyToast.slice(0, 60),
+    );
+    await fetch(`http://127.0.0.1:${APP_PORT}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ consoleHost: null }),
+    });
+
     // Scan a folder the way the interface does, then add what it found.
     await evaluate(`document.querySelector('.nav[data-view="forge"]').click()`);
     await evaluate(

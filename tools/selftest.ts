@@ -1116,6 +1116,40 @@ async function main(): Promise<void> {
     const stillDown = ((await (await fetch(`${recoveryHost}/api/state`)).json()) as any).console;
     check("the second look is honest too, not a cached success", stillDown.connected === false, String(stillDown.connected));
 
+    // A library entry that outlives its console: the title still lists, and a
+    // deploy to the dead address fails with a sentence quickly, not a hang.
+    const offlinePost = (path: string, payload: unknown) =>
+      fetch(`${recoveryHost}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    await offlinePost("/api/import", {
+      items: [{ titleId: "PSTA00091", title: "Stale", path: FIXTURE, kind: "Game folder", size: 0 }],
+    });
+    await mkdir(join(bootRoot, "recovery", "data", "tmp"), { recursive: true });
+    await offlinePost("/api/build", { titleId: "PSTA00091" });
+    let stale: any = null;
+    for (let i = 0; i < 80; i++) {
+      const state = (await (await fetch(`${recoveryHost}/api/state`)).json()) as any;
+      stale = state.games.find((game: any) => game.titleId === "PSTA00091");
+      if (stale && stale.state !== "building") break;
+      await Bun.sleep(150);
+    }
+    check("a title whose console is offline still lists", stale?.state === "built" && Boolean(stale?.pkgPath), `${stale?.state}`);
+    const deployStart = Date.now();
+    const deployAnswer = (await (await offlinePost("/api/deploy", { titleId: "PSTA00091" })).json()) as any;
+    const deployMs = Date.now() - deployStart;
+    check(
+      "a deploy to an offline console fails with a sentence",
+      deployAnswer.ok === false && typeof deployAnswer.detail === "string" && deployAnswer.detail.length > 10,
+      JSON.stringify(deployAnswer).slice(0, 90),
+    );
+    check("that failure comes back quickly, not as a hang", deployMs < 6000, `${deployMs}ms`);
+    const afterDeploy = (await (await fetch(`${recoveryHost}/api/state`)).json()) as any;
+    const staleAfter = afterDeploy.games.find((game: any) => game.titleId === "PSTA00091");
+    check("the failed deploy leaves an error, not a running job", staleAfter?.state === "error", `${staleAfter?.state}`);
+
     const listener = Bun.serve({ port: 8197, fetch: () => Response.json({ ok: true, version: "check", free: 5 }) });
     let linked: any = null;
     for (let i = 0; i < 40; i++) {
@@ -1264,6 +1298,54 @@ async function main(): Promise<void> {
     );
   } finally {
     race.child.kill();
+  }
+
+  // A packer command that fails: the job must end as an error with the code,
+  // not sit in "building" and not leave the request open.
+  const failing = await bootApp(
+    "failing",
+    JSON.stringify({
+      port: 8141,
+      consoleHost: null,
+      engine: "command",
+      enginePaths: { command: "exit 7" },
+      scanDirs: [],
+    }),
+    null,
+    8141,
+    {},
+  );
+  const failingHost = "http://127.0.0.1:8141";
+  const failingPost = (path: string, payload: unknown) =>
+    fetch(`${failingHost}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  try {
+    await mkdir(join(bootRoot, "failing", "data", "tmp"), { recursive: true });
+    await failingPost("/api/import", {
+      items: [{ titleId: "PSTA00095", title: "Breaks", path: FIXTURE, kind: "Game folder", size: 0 }],
+    });
+    const accepted = await failingPost("/api/build", { titleId: "PSTA00095" });
+    check("a build with a broken packer is still accepted", accepted.status === 200, String(accepted.status));
+    let state: any = null;
+    for (let i = 0; i < 100; i++) {
+      state = await (await fetch(`${failingHost}/api/state`)).json();
+      const game = state.games.find((entry: any) => entry.titleId === "PSTA00095");
+      if (game && game.state !== "building") break;
+      await Bun.sleep(150);
+    }
+    const broken = state.games.find((entry: any) => entry.titleId === "PSTA00095");
+    check("a failed packer ends the job as an error", broken?.state === "error", `${broken?.state}`);
+    check(
+      "the failure names the exit code",
+      /\(7\)|exit 7|code 7/i.test(String(broken?.note)),
+      String(broken?.note).slice(0, 90),
+    );
+    check("no package is left behind for a failed build", !broken?.pkgPath, String(broken?.pkgPath));
+  } finally {
+    failing.child.kill();
   }
 
   await rm(bootRoot, { recursive: true, force: true });
