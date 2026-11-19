@@ -39,6 +39,7 @@
 #include <csignal>
 #include <ctime>
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -3125,14 +3126,63 @@ void handle(int fd) {
   }
 
   if (std::strcmp(method, "GET") == 0 && std::strcmp(path, "/api/health") == 0) {
-    char answer[320];
+    // A gate has to know that a package can actually land before it starts a
+    // 20 GB download, so writability is probed here rather than assumed.
+    char probe_path[640];
+    std::snprintf(probe_path, sizeof probe_path, "%s/.gate-write", kRoot);
+    const int probe = ::open(probe_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    bool writable = false;
+    if (probe >= 0) {
+      writable = ::write(probe, "x", 1) == 1;
+      ::close(probe);
+      ::unlink(probe_path);
+    }
+    char mac_now[96] = {0};
+    pthread_mutex_lock(&g_lock);
+    std::snprintf(mac_now, sizeof mac_now, "%s", g_mac);
+    pthread_mutex_unlock(&g_lock);
+    char answer[640];
     std::snprintf(answer, sizeof answer,
                   "{\"ok\":true,\"version\":\"%s\",\"build\":\"%s\",\"free\":%lld,\"port\":%d,"
-                  "\"scanning\":%s,\"playing\":%s,\"mount\":%s,\"homeApp\":%s,\"homeAppState\":%d}",
+                  "\"scanning\":%s,\"playing\":%s,\"mount\":%s,\"homeApp\":%s,\"homeAppState\":%d,"
+                  "\"dataWritable\":%s,\"mac\":\"%s\"}",
                   kVersion, PV_BUILD_ID, free_bytes(), g_port,
                   g_scanning ? "true" : "false", g_playing ? "true" : "false",
                   g_mount_payload == 1 ? "true" : "false",
-                  g_home_app == kHomeAppRegistered ? "true" : "false", g_home_app);
+                  g_home_app == kHomeAppRegistered ? "true" : "false", g_home_app,
+                  writable ? "true" : "false", mac_now);
+    reply(fd, 200, answer);
+    ::close(fd);
+    return;
+  }
+
+  // ---- can this console reach the Mac? ----
+  // The Mac's own probe can only prove the Mac→console direction. A one-way
+  // firewall looks identical from there, so the console makes its own request
+  // to the address the Mac advertised and reports that direction separately.
+  if (std::strcmp(method, "GET") == 0 && std::strcmp(path, "/api/probe-mac") == 0) {
+    char mac_now[96] = {0};
+    pthread_mutex_lock(&g_lock);
+    std::snprintf(mac_now, sizeof mac_now, "%s", g_mac);
+    pthread_mutex_unlock(&g_lock);
+    if (!mac_now[0]) {
+      reply(fd, 409, "{\"ok\":false,\"message\":\"This console does not know the Mac's address yet.\"}");
+      ::close(fd);
+      return;
+    }
+    char url[256];
+    // The Mac app answers /api/state; its health lives under the payload's own
+    // /api/health, so probing that path here would 404 on a healthy Mac.
+    std::snprintf(url, sizeof url, "http://%s/api/state", mac_now);
+    char body[512] = {0};
+    const auto started = std::chrono::steady_clock::now();
+    const int status = http_call("GET", url, nullptr, body, sizeof body);
+    const long long took =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    char answer[640];
+    std::snprintf(answer, sizeof answer,
+                  "{\"ok\":%s,\"host\":\"%s\",\"status\":%d,\"ms\":%lld}",
+                  status == 200 ? "true" : "false", mac_now, status, took);
     reply(fd, 200, answer);
     ::close(fd);
     return;

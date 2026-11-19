@@ -2094,7 +2094,7 @@ async function main(): Promise<void> {
   };
   try {
     const good = mixedFixtures.filter((fixture) => fixture.valid);
-    const broken = mixedFixtures.filter((fixture) => !fixture.valid);
+    const broken = mixedFixtures.filter((fixture) => !fixture.valid && fixture.name !== "encrypted-eboot");
     check("mixed soak: every fixture shape exists", good.length >= 3 && broken.length >= 2, `${good.length}/${broken.length}`);
     for (let cycle = 0; cycle < 10; cycle++) {
       if (cycle === 5) {

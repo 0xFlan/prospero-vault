@@ -27,6 +27,49 @@ async function eboot(target: string): Promise<void> {
   await copyFile(join(process.cwd(), "console", "build", "prospero-vault.elf"), target);
 }
 
+/**
+ * A retail-shaped eboot: a real ELF64 x86-64 executable with two PT_LOAD
+ * segments. `cc` on this Mac would emit Mach-O, which is not the shape a dump
+ * carries, so the file is written byte for byte instead.
+ */
+async function realElf(target: string): Promise<boolean> {
+  const size = 0x4000;
+  const image = Buffer.alloc(size);
+  image.write("\x7fELF", 0, "latin1");
+  image[4] = 2; // ELFCLASS64
+  image[5] = 1; // ELFDATA2LSB
+  image[6] = 1; // EV_CURRENT
+  image.writeUInt16LE(2, 16); // ET_EXEC
+  image.writeUInt16LE(0x3e, 18); // EM_X86_64
+  image.writeUInt32LE(1, 20);
+  image.writeBigUInt64LE(0x400000n + 0x78n, 24); // entry
+  image.writeBigUInt64LE(64n, 32); // phoff
+  image.writeUInt16LE(64, 52);
+  image.writeUInt16LE(56, 54);
+  image.writeUInt16LE(2, 56); // two PT_LOAD segments
+
+  const writeSegment = (index: number, offset: number, vaddr: number) => {
+    const at = 64 + index * 56;
+    image.writeUInt32LE(1, at); // PT_LOAD
+    image.writeUInt32LE(5, at + 4); // R+X
+    image.writeBigUInt64LE(BigInt(offset), at + 8);
+    image.writeBigUInt64LE(BigInt(vaddr), at + 16);
+    image.writeBigUInt64LE(BigInt(vaddr), at + 24);
+    image.writeBigUInt64LE(0x2000n, at + 32);
+    image.writeBigUInt64LE(0x2000n, at + 40);
+    image.writeBigUInt64LE(0x1000n, at + 48);
+  };
+  writeSegment(0, 0x1000, 0x400000);
+  writeSegment(1, 0x3000, 0x402000);
+
+  // Some plausible code so the image is not a hole.
+  for (let i = 0; i < 256; i++) image[0x1000 + i] = (i * 37 + 11) & 0xff;
+  image[0x1000] = 0x55; // push rbp
+  image[0x1001] = 0xc3; // ret
+  await writeFile(target, image);
+  return true;
+}
+
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
   "base64",
@@ -111,7 +154,53 @@ export async function makeDumpFixtures(
   }
   fixtures.push({ name: "large", path: large, titleId: "PPSA09004", valid: true });
 
-  // 5. Malformed: eboot but no metadata at all.
+  // 5. Retail-shaped: a real compiled ELF eboot with PT_LOAD segments.
+  const retail = join(root, "retail", "PPSA09010");
+  await mkdir(join(retail, "sce_sys"), { recursive: true });
+  await writeFile(
+    join(retail, "sce_sys", "param.json"),
+    JSON.stringify(
+      PARAM({
+        titleId: "PPSA09010",
+        titleName: "Retail Shaped Title",
+        contentId: "UP0000-PPSA09010_00-RETAIL0000000001",
+      }),
+    ),
+  );
+  await writeFile(join(retail, "sce_sys", "icon0.png"), PNG);
+  const elfMade = await realElf(join(retail, "eboot.bin"));
+  fixtures.push({ name: "retail", path: retail, titleId: "PPSA09010", valid: elfMade });
+
+  const retailConsole = join(root, "retail", "PPSA09012");
+  await mkdir(join(retailConsole, "sce_sys"), { recursive: true });
+  await writeFile(
+    join(retailConsole, "sce_sys", "param.json"),
+    JSON.stringify(
+      PARAM({
+        titleId: "PPSA09012",
+        titleName: "Retail Console Title",
+        contentId: "UP0000-PPSA09012_00-RETAIL0000000002",
+      }),
+    ),
+  );
+  await writeFile(join(retailConsole, "sce_sys", "icon0.png"), PNG);
+  await realElf(join(retailConsole, "eboot.bin"));
+  fixtures.push({ name: "retail-console", path: retailConsole, titleId: "PPSA09012", valid: true });
+
+  // 6. Malformed: an encrypted eboot (not an ELF) is a decryption problem, not
+  // a packer problem, and the gate has to say which.
+  const encrypted = join(root, "broken", "PPSA09011");
+  await mkdir(join(encrypted, "sce_sys"), { recursive: true });
+  await writeFile(
+    join(encrypted, "sce_sys", "param.json"),
+    JSON.stringify(PARAM({ titleId: "PPSA09011", contentId: "UP0000-PPSA09011_00-SYNTHETIC0000011" })),
+  );
+  const noise = new Uint8Array(64 * 1024);
+  for (let i = 0; i < noise.length; i++) noise[i] = (i * 131 + 17) & 0xff;
+  await writeFile(join(encrypted, "eboot.bin"), noise);
+  fixtures.push({ name: "encrypted-eboot", path: encrypted, titleId: "PPSA09011", valid: false, expect: "ELF" });
+
+  // 7. Malformed: eboot but no metadata at all.
   const noMeta = join(root, "broken", "PPSA09005");
   await mkdir(noMeta, { recursive: true });
   await eboot(join(noMeta, "eboot.bin"));

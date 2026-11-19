@@ -8,7 +8,7 @@
     "dev": "bun run app/server.ts",
     "start": "bun run app/server.ts",
     "preview": "bun run tools/preview-console-ui.ts",
-    "test": "bun run tools/selftest.ts",
+    "test": "bun run tools/selftest.ts && bun run tools/gate-check.ts",
     "check:payload": "bash tools/payload-check.sh",
     "check:pipeline": "bun run tools/pipeline-check.ts",
     "check:dumps": "bun run tools/dump-check.ts",

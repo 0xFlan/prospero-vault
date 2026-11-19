@@ -149,8 +149,8 @@ async function main(): Promise<void> {
     return { code: await child.exited, text };
   };
 
-  const macOnly = fixtures.find((fixture) => fixture.name === "pkg-editor")!;
-  const consoleDump = fixtures.find((fixture) => fixture.name === "odd-names")!;
+  const macOnly = fixtures.find((fixture) => fixture.name === "retail")!;
+  const consoleDump = fixtures.find((fixture) => fixture.name === "retail-console")!;
 
   // ---- both paths, preconditions first ----
   const gate = await preflight(["--dump", macOnly.path, "--console", `${lanHost}:${CONSOLE_PORT}`, "--mac", `127.0.0.1:${MAC_PORT}`, "--path", "both"]);
@@ -199,8 +199,8 @@ async function main(): Promise<void> {
   // ---- console-direct: dump lives on the console, Mac pulls and builds ----
   const consoleCopy = join(consoleRoot, "Games", consoleDump.titleId);
   await mkdir(consoleCopy, { recursive: true });
-  await copyFile(join(consoleDump.path, "SCE_SYS", "PARAM.JSON"), join(consoleCopy, "param.json"));
-  await copyFile(join(consoleDump.path, "EBOOT.BIN"), join(consoleCopy, "eboot.bin"));
+  await copyFile(join(consoleDump.path, "sce_sys", "param.json"), join(consoleCopy, "param.json"));
+  await copyFile(join(consoleDump.path, "eboot.bin"), join(consoleCopy, "eboot.bin"));
   await mkdir(join(consoleCopy, "sce_sys"), { recursive: true });
   await copyFile(join(consoleCopy, "param.json"), join(consoleCopy, "sce_sys", "param.json"));
   await chmod(consoleCopy, 0o755);
@@ -239,11 +239,54 @@ async function main(): Promise<void> {
   const fresh = fixtures.find((fixture) => fixture.name === "dlc")!;
   const broken = await preflight(["--dump", fresh.path, "--console", "127.0.0.1:9", "--mac", `127.0.0.1:${MAC_PORT}`, "--path", "mac", "--run"]);
   check("an unreachable console fails the gate", broken.code === 1, `exit ${broken.code}`);
-  check("and names the console as the missing piece", /console: payload answers/i.test(broken.text) && /elfldr|address/i.test(broken.text), broken.text.split("\n").find((line) => line.includes("FAIL"))?.slice(0, 110) ?? "");
+  check("and names the console as the missing piece", /Mac → console/i.test(broken.text) && /elfldr|address/i.test(broken.text), broken.text.split("\n").find((line) => line.includes("FAIL"))?.slice(0, 110) ?? "");
   check("and says nothing was built", /Nothing was built/.test(broken.text));
   const untouched = await get(`${BASE}/api/state`);
   const library = untouched ? JSON.parse(untouched.text).games : [];
   check("the broken run created no job", !library.some((game: any) => game.titleId === fresh.titleId));
+
+  // ---- each new precondition, broken in turn ----
+  const realMac = `${lanHost}:${MAC_PORT}`;
+
+  // (a) a console that cannot reach the Mac, while the Mac reaches it fine
+  await post(`http://127.0.0.1:${CONSOLE_PORT}/api/config`, { mac: `${lanHost}:1` });
+  const oneWay = await preflight(["--dump", fresh.path, "--console", `${lanHost}:${CONSOLE_PORT}`, "--mac", `127.0.0.1:${MAC_PORT}`, "--path", "mac", "--run"]);
+  const oneWayLines = oneWay.text.split("\n");
+  check("a console that cannot reach the Mac fails the gate", oneWay.code === 1, `exit ${oneWay.code}`);
+  check("the console→Mac line names the direction", oneWayLines.some((line) => /FAIL.*console → Mac/.test(line)), oneWayLines.find((line) => /console → Mac/.test(line))?.slice(0, 120) ?? "");
+  check("the Mac→console line still passes, so the directions are distinct", oneWayLines.some((line) => /PASS.*Mac → console/.test(line)), "");
+  check("and it says nothing was built", /Nothing was built/.test(oneWay.text));
+  const afterOneWay = await get(`${BASE}/api/state`);
+  check("the one-way run created no job", !JSON.parse(afterOneWay!.text).games.some((game: any) => game.titleId === fresh.titleId));
+  await post(`http://127.0.0.1:${CONSOLE_PORT}/api/config`, { mac: realMac });
+
+  // (b) an encrypted eboot is recognised before the packer runs
+  const encrypted = fixtures.find((fixture) => fixture.name === "encrypted-eboot")!;
+  const blob = await preflight(["--dump", encrypted.path, "--console", `${lanHost}:${CONSOLE_PORT}`, "--mac", `127.0.0.1:${MAC_PORT}`, "--path", "mac", "--run"]);
+  check("an encrypted eboot fails the gate", blob.code === 1, `exit ${blob.code}`);
+  check("the line says the dump is encrypted and how to fix it", /FAIL.*decrypted ELF/.test(blob.text) && /decrypt it before packing/.test(blob.text), blob.text.split("\n").find((line) => /decrypted ELF/.test(line))?.slice(0, 120) ?? "");
+  check("and the encrypted run created no job", !JSON.parse((await get(`${BASE}/api/state`))!.text).games.some((game: any) => game.titleId === encrypted.titleId));
+
+  // (c) a console whose /data cannot be written stops the run before the build
+  const lockedRoot = join(ROOT, "console-locked");
+  await mkdir(join(lockedRoot, "Games"), { recursive: true });
+  const lockedPort = freePort();
+  const lockedPayload = join(ROOT, `payload-locked-${lockedPort}`);
+  const lockedBuild = await run([
+    "c++", "-std=c++17", "-O2", "-pthread",
+    `-DPV_ROOT=\"${lockedRoot}\"`, `-DPV_APP_ROOT=\"${appRoot}\"`, `-DPV_PORT=${lockedPort}`,
+    "console/main.cpp", "console/build/ui_data.cpp", "-o", lockedPayload,
+  ], {});
+  check("a second payload builds for the locked check", lockedBuild === 0);
+  const lockedChild = Bun.spawn({ cmd: [lockedPayload], stdout: "pipe", stderr: "pipe" });
+  check("the locked payload answers", await waitFor(`http://127.0.0.1:${lockedPort}/api/health`, 8000));
+  await chmod(lockedRoot, 0o555);
+  const noSpace = await preflight(["--dump", fresh.path, "--console", `${lanHost}:${lockedPort}`, "--mac", `127.0.0.1:${MAC_PORT}`, "--path", "mac", "--run"]);
+  check("an unwritable console /data fails the gate", noSpace.code === 1, `exit ${noSpace.code}`);
+  check("the line names /data and the fix", /FAIL.*\/data writable/.test(noSpace.text) && /mounted read-write/.test(noSpace.text), noSpace.text.split("\n").find((line) => /\/data writable/.test(line))?.slice(0, 120) ?? "");
+  check("and the unwritable run created no job", !JSON.parse((await get(`${BASE}/api/state`))!.text).games.some((game: any) => game.titleId === fresh.titleId));
+  await chmod(lockedRoot, 0o755);
+  lockedChild.kill();
 
   // ---- restart the Mac, then the gate must still pass ----
   app.kill();

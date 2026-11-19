@@ -490,10 +490,11 @@ Verified on this Mac:
   `param.sfo` parsing, build, serving, `Range` resume, deploy, a 60-cycle soak,
   and a mixed good/bad dump soak across a restart, and that a build leaves no
   temporary files or scratch folder behind
-- `bun run check:gate` — 30 checks: the real payload built for this Mac on the
-  LAN, preflight passing, both delivery paths building byte-identical packages,
-  an unreachable console stopping the run, and the gate again after a restart
-- `bun run check:dumps` — 38 checks over synthesized PkgEditor-style, uppercase,
+- `bun run check:gate` — 43 checks: the real payload built for this Mac on the
+  LAN, preflight passing with all 14 lines, both delivery paths building
+  byte-identical packages, each new precondition broken in turn with no job
+  created, and the gate again after a restart
+- `bun run check:dumps` — 52 checks over synthesized PkgEditor-style, uppercase,
   DLC, 240 MB-payload, missing-metadata, no-eboot and bad-content-id dumps,
   every one through scan → import → build
 
@@ -522,25 +523,55 @@ bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097
 ```
 
 ```
-  PASS  companion Mac: app answers /api/state                   http://127.0.0.1:8090
-  PASS  companion Mac: a real packer is available               bundled packer (or a configured command)
-  PASS  companion Mac: advertises a LAN address (not loopback)  http://192.168.4.26:8090
-  PASS  companion Mac: answers over that LAN address            http://192.168.4.26:8090/api/state → 200
-  PASS  dump: readable folder with metadata and eboot           /dumps/PPSA01234-app
-  PASS  console: address configured                             192.168.4.100:8097
-  PASS  console: payload answers /api/health                    payload 0.11.0 at http://192.168.4.100:8097
-  PASS  console: enough free space                              109.3 GB free (a package needs its own size plus headroom)
-  PASS  console-direct: console lists this dump                 PPSA01234 is in the console's scan
+  PASS  companion Mac: app answers /api/state                       http://127.0.0.1:8090
+  PASS  companion Mac: a real packer is available                   bundled packer (or a configured command)
+  PASS  companion Mac: advertises a LAN address (not loopback)      http://192.168.4.26:8090
+  PASS  companion Mac: answers over that LAN address                http://192.168.4.26:8090/api/state → 200
+  PASS  dump: eboot is a decrypted ELF (not an encrypted blob)      ELF64, e_machine 0x3e, 2 program headers
+  PASS  dump: eboot is retail-shaped, not this payload's stub       compiled executable, PT_LOAD segments present
+  PASS  dump: readable folder with metadata and eboot               /dumps/PPSA01234-app
+  PASS  dump: param.json carries the fields the packer needs        titleId, contentId, titleName and version are present and well-formed
+  PASS  console: address configured                                 192.168.4.100:8097
+  PASS  reachability: Mac → console (this app reaches the payload)  payload 0.11.0 at http://192.168.4.100:8097
+  PASS  console: /data writable with space for the package          109.3 GB free, 2.0 GB needed
+  PASS  console: knows this Mac's LAN address                       192.168.4.26:8090 (taught now)
+  PASS  reachability: console → Mac (payload probes the Mac)        192.168.4.26:8090 answered in 3 ms
+  PASS  console-direct: console lists this dump                     not required for --path both; the Mac will send the package
 
-9/9 preconditions passed
+14/14 preconditions passed
 ```
 
 Exit code is `0` when every line passed, `1` when one did not, `2` for a usage
-mistake. A failing line prints the missing piece and what to do — for example
-`no answer from http://192.168.4.100:8097/api/health — load
-console/build/prospero-vault.elf with elfldr, then check the address`. Nothing
-is built while a precondition fails, and each run writes its checks and outcome
-to `data/last-gate.json`.
+mistake. Nothing is built while a precondition fails, and each run writes its
+checks and outcome to `data/last-gate.json`.
+
+What the lines mean, and what a failure says to do:
+
+- **reachability, both directions.** `Mac → console` is this app fetching the
+  payload's health. `console → Mac` is a separate request the *payload* makes to
+  the Mac's advertised address; the two are reported independently, so a one-way
+  firewall shows up as `reachability: console → Mac … did not answer the console
+  — allow the Mac's port 8090 through the firewall`, while `Mac → console` stays
+  PASS. A console that has never heard from this Mac is taught the address once;
+  a console holding a *different* address fails with `the console holds
+  "192.168.4.99:8090", not 192.168.4.26:8090` rather than being silently
+  overwritten.
+- **console: /data writable with space.** The payload creates and removes a file
+  in `/data/prospero-vault` and reports the result; the line fails with `the
+  console could not write to /data/prospero-vault — check that /data is mounted
+  read-write`, or when free space is below the package's size plus headroom.
+- **dump: eboot is a decrypted ELF.** Reads the first 64 bytes. A blob without
+  `\x7fELF` fails with `has no \x7fELF header — the dump is still encrypted or
+  truncated; decrypt it before packing`. The packer itself accepts an encrypted
+  eboot and produces an unplayable package, which is why this is checked first.
+- **dump: eboot is retail-shaped.** The payload ELF used by the synthetic
+  fixtures is called out instead of passing for a game.
+- **dump: param.json fields.** `titleId` (`PPSA01234`), `contentId`
+  (`UP0000-PPSA01234_00-XXXXXXXXXXXXXXXX`), `titleName` and `version` are
+  validated; a failure names each bad field and its expected shape.
+- **console-direct: console lists this dump.** Only required for `--path
+  console`; for the Mac path the line reads `not required for --path mac; the Mac
+  will send the package`.
 
 `--path console` requires the dump to be on the console already (copy it to
 `/data/prospero-vault/Games`, then rescan there). `--path mac` requires the dump
@@ -553,7 +584,7 @@ need the dump in its own scan. Omitting `--path` reports both.
 2. `bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097 --path console --run`
 3. the gate starts the console's Convert job, the Mac pulls the dump, builds, and
    the console downloads the package; the run ends with
-   `console 202; done — Package received · 1.0 MB`
+   `console 202; done — Package received · 781.4 KB` (the size is the dump's)
 4. the package is `/data/prospero-vault/Games/PPSA01234.pkg` on the console
 
 Without `--run`, press Convert on the console itself after the gate passes — the
@@ -569,9 +600,11 @@ same path, started from its own screen.
 A Mac-held dump is not required to be in the console's scan: the payload accepts
 the job because the Mac already holds the finished package. `bun run check:gate`
 exercises exactly this, with the real payload source built for this Mac on the
-LAN, the dump built once through each path, byte comparison between the Mac's
-package and the console's copy, a broken console address that must stop the run,
-and the whole gate again after a Mac restart.
+LAN, the retail-shaped fixture built once through each path, byte comparison
+between the Mac's package and the console's copy, each new precondition broken
+in turn (unreachable console, console that cannot reach the Mac, encrypted
+ebout, unwritable `/data`) with the run stopping and creating no job, and the
+whole gate again after a Mac restart.
 
 ## Point it at a real dump
 
