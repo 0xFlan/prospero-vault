@@ -379,6 +379,8 @@ grep -q '"ok":false' /tmp/pv_check_short.txt && ok "that refusal is JSON" || no 
 # --- health, port fallback ------------------------------------------------
 health=$(curl -s --max-time 5 $B/api/health)
 echo "$health" | grep -q "\"port\":$PORT" && ok "health reports the bound port" || no "health reports the bound port" "$health"
+echo "$health" | grep -q '"firmware":"host"' && ok "health names a host build honestly" || no "health names a host build honestly" "$health"
+echo "$health" | grep -q '"install":"host"' && ok "health does not claim a host install" || no "health does not claim a host install" "$health"
 
 /tmp/pv_check_host >/tmp/pv_check2.log 2>&1 &
 PID2=$!

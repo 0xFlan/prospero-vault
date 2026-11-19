@@ -12,6 +12,9 @@
 PS5_PAYLOAD_SDK ?= $(HOME)/ps5-harness/.deps/ps5-payload-sdk
 BUILD_DIR       ?= build
 BUILD_ID        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)
+# A spare port lets a test build run beside the payload already on 8097.
+# Deliberately not PORT: shells often export PORT for their own reasons.
+PV_LISTEN_PORT  ?= 8097
 
 HAVE_SDK := $(wildcard $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk)
 
@@ -23,7 +26,7 @@ ifneq ($(HAVE_SDK),)
 include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 endif
 
-CXXFLAGS += -std=c++17 -O2 -Wall -Wextra -DPV_BUILD_ID=\"$(BUILD_ID)\" -DPV_HAVE_SONY=1
+CXXFLAGS += -std=c++17 -O2 -Wall -Wextra -DPV_BUILD_ID=\"$(BUILD_ID)\" -DPV_HAVE_SONY=1 -DPV_PORT=$(PV_LISTEN_PORT)
 
 # Sony's launcher and user-service entry points. The SDK ships them as link
 # stubs; the console binds them at load time. libSceAppInstUtil is deliberately

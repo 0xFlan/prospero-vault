@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
+#include <sys/utsname.h>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdint>
@@ -79,6 +80,17 @@ int sceLncUtilIsAppLaunched(const char* title_id);
 int sceSystemServiceLaunchApp(const char* title_id, const char* argv, void* param);
 int sceUserServiceInitialize(void* param);
 int sceUserServiceGetForegroundUser(int* user_id);
+
+// libkernel's own answer for "which firmware am I running on". The layout is
+// the one ps5-payload-dev uses and was verified on 11.60; bin_version packs the
+// version as 0xMMmm0000 with the digits written in hex.
+struct SceSystemSwVersion {
+  unsigned long unknown1;
+  char str_version[0x1c];
+  unsigned int bin_version;
+  unsigned long unknown2;
+};
+int sceKernelGetProsperoSystemSwVersion(SceSystemSwVersion* version);
 
 // libSceAppInstUtil is deliberately not linked. On firmware 13.20 the loader
 // crashes while mapping it into a payload process, so every Vault load died
@@ -269,6 +281,13 @@ int g_home_app = kHomeAppUnknown;
 
 /** The port actually bound, which is kPort unless something else took it. */
 int g_port = kPort;
+
+/**
+ * Firmware identity, read once at startup. The number is used only to describe
+ * the public install ceiling; it never pretends an unsupported install works.
+ */
+char g_firmware[40] = "unknown";
+int g_firmware_code = 0;
 
 /** Defined with the response builders below; declared here for the scan swap. */
 void games_json(char* out, std::size_t cap);
@@ -462,6 +481,91 @@ long long free_bytes() {
   struct statvfs info;
   if (::statvfs(kRoot, &info) != 0) return -1;
   return static_cast<long long>(info.f_bavail) * static_cast<long long>(info.f_frsize);
+}
+
+/** 13.20 -> 1320; anything that is not a version is 0 (unknown). */
+int parse_firmware_code(const char* text) {
+  int major = 0;
+  int minor = 0;
+  if (!text || std::sscanf(text, "%d.%d", &major, &minor) != 2) return 0;
+  if (major <= 0 || minor < 0) return 0;
+  return major * 100 + minor;
+}
+
+/**
+ * Reads the console's firmware for the capability report.
+ *
+ * sceKernelGetProsperoSystemSwVersion is the direct answer. uname is kept as a
+ * fallback because a payload that replaces or hides libkernel's answer should
+ * still be able to say "unknown" rather than crashing.
+ */
+void read_firmware_version() {
+#if PV_HAVE_SONY
+  char text[40] = {0};
+  SceSystemSwVersion version;
+  std::memset(&version, 0, sizeof version);
+  const int rc = sceKernelGetProsperoSystemSwVersion(&version);
+  if (rc == 0 && version.bin_version) {
+    std::snprintf(text, sizeof text, "%x.%02x",
+                  static_cast<unsigned>((version.bin_version >> 24) & 0xffu),
+                  static_cast<unsigned>((version.bin_version >> 16) & 0xffu));
+  }
+  if (!text[0] && rc == 0 && version.str_version[0]) {
+    std::snprintf(text, sizeof text, "%.*s", static_cast<int>(sizeof version.str_version), version.str_version);
+  }
+  if (!text[0]) {
+    struct utsname system_name;
+    if (::uname(&system_name) == 0) std::snprintf(text, sizeof text, "%s", system_name.release);
+  }
+  if (text[0]) {
+    std::size_t length = std::strlen(text);
+    while (length > 0 && (text[length - 1] == ' ' || text[length - 1] == '\t')) text[--length] = '\0';
+    std::snprintf(g_firmware, sizeof g_firmware, "%s", text);
+    g_firmware_code = parse_firmware_code(text);
+  }
+  if (g_firmware_code > 0) {
+    log_fmt("firmware: %s", g_firmware);
+  } else {
+    log_fmt("firmware: %s (install support unknown)", g_firmware);
+  }
+#else
+  std::snprintf(g_firmware, sizeof g_firmware, "host");
+  g_firmware_code = 0;
+#endif
+}
+
+/**
+ * What the public tooling supports on this firmware, not what a hopeful UI would
+ * like. The install ceiling is a property of kstuff/ppr-patch, not of Vault.
+ */
+void install_capability(char* state, std::size_t state_cap, char* reason, std::size_t reason_cap) {
+#if PV_HAVE_SONY
+  if (g_firmware_code <= 0) {
+    std::snprintf(state, state_cap, "unknown");
+    std::snprintf(reason, reason_cap,
+                  "This payload could not read the firmware version, so install support is unknown. "
+                  "The console's installer reports the real result.");
+  } else if (g_firmware_code <= 1160) {
+    std::snprintf(state, state_cap, "supported");
+    std::snprintf(reason, reason_cap,
+                  "This firmware is inside the public kstuff/ppr-patch install range (through 11.60). "
+                  "That is the documented ceiling, not a test on this machine.");
+  } else if (g_firmware_code <= 1360) {
+    std::snprintf(state, state_cap, "blocked");
+    std::snprintf(reason, reason_cap,
+                  "Public kstuff/ppr-patch support for debug-package installs stops at 11.60. On %s the "
+                  "console's installer returns 0x80BD0005, so mount the dump or image instead.",
+                  g_firmware);
+  } else {
+    std::snprintf(state, state_cap, "unavailable");
+    std::snprintf(reason, reason_cap,
+                  "There is no public exploit above 13.60, so this payload cannot run there and no "
+                  "debug-package install path exists.");
+  }
+#else
+  std::snprintf(state, state_cap, "host");
+  std::snprintf(reason, reason_cap, "A host build cannot install a package.");
+#endif
 }
 
 bool ends_with(const char* text, const char* suffix) {
@@ -3585,12 +3689,22 @@ void handle(int fd) {
     pthread_mutex_lock(&g_lock);
     std::snprintf(mac_now, sizeof mac_now, "%s", g_mac);
     pthread_mutex_unlock(&g_lock);
-    char answer[640];
+    char install_state[24] = {0};
+    char install_reason[320] = {0};
+    install_capability(install_state, sizeof install_state, install_reason, sizeof install_reason);
+    char safe_firmware[80];
+    char safe_install[48];
+    char safe_reason[400];
+    jescape(safe_firmware, sizeof safe_firmware, g_firmware);
+    jescape(safe_install, sizeof safe_install, install_state);
+    jescape(safe_reason, sizeof safe_reason, install_reason);
+    char answer[1400];
     std::snprintf(answer, sizeof answer,
-                  "{\"ok\":true,\"version\":\"%s\",\"build\":\"%s\",\"free\":%lld,\"port\":%d,"
+                  "{\"ok\":true,\"version\":\"%s\",\"build\":\"%s\",\"firmware\":\"%s\","
+                  "\"install\":\"%s\",\"installReason\":\"%s\",\"free\":%lld,\"port\":%d,"
                   "\"scanning\":%s,\"playing\":%s,\"mount\":%s,\"homeApp\":%s,\"homeAppState\":%d,"
                   "\"dataWritable\":%s,\"mac\":\"%s\"}",
-                  kVersion, PV_BUILD_ID, free_bytes(), g_port,
+                  kVersion, PV_BUILD_ID, safe_firmware, safe_install, safe_reason, free_bytes(), g_port,
                   g_scanning ? "true" : "false", g_playing ? "true" : "false",
                   g_mount_payload == 1 ? "true" : "false",
                   g_home_app == kHomeAppRegistered ? "true" : "false", g_home_app,
@@ -4078,6 +4192,7 @@ int main() {
   g_log_fd = ::open(kLogFile, O_WRONLY | O_CREAT | O_APPEND, 0666);
 
   log_fmt("%s %s build %s", kName, kVersion, PV_BUILD_ID);
+  read_firmware_version();
   load_config();
 
   // Serve first, scan second: on a console with USB drives the walk takes

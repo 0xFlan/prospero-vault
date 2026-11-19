@@ -382,6 +382,13 @@ Bun.serve({
         ok: true,
         version: VERSION,
         build: "preview",
+        // The console this preview stands in for: public install support stops
+        // at 11.60, so the interface must say so instead of starting a job.
+        firmware: "13.20",
+        install: "blocked",
+        installReason:
+          "Public kstuff/ppr-patch support for debug-package installs stops at 11.60. On 13.20 the " +
+          "console's installer returns 0x80BD0005, so mount the dump or image instead.",
         free,
         homeApp: homeAppState === 1,
         homeAppState,

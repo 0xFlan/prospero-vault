@@ -922,6 +922,48 @@
         return "off";
       }
 
+      // The console answers with its firmware and the public install ceiling.
+      // These helpers only read that answer; they never turn a "blocked" into
+      // a hopeful "try it and see".
+      function installState() {
+        var health = S.health || {};
+        return health.install || "unknown";
+      }
+
+      function installLabel() {
+        var state = installState();
+        if (state === "supported") return "Supported";
+        if (state === "blocked") return "Blocked";
+        if (state === "unavailable") return "No path";
+        if (state === "host") return "Host build";
+        return "Unknown";
+      }
+
+      function installReason() {
+        var health = S.health || {};
+        return health.installReason ||
+          "This payload did not report install support. The console's installer will answer when it is asked.";
+      }
+
+      function firmwareName() {
+        var health = S.health || {};
+        return health.firmware || "unknown";
+      }
+
+      function packInstallNote() {
+        var state = installState();
+        if (state === "blocked") {
+          return "This firmware cannot install the result: public support stops at 11.60 and the installer returns 0x80BD0005. It can still be packed and kept for a console with support.";
+        }
+        if (state === "unavailable") {
+          return "This firmware has no public exploit, so the result cannot be installed here.";
+        }
+        if (state === "supported") {
+          return "This firmware is inside the public install range (through 11.60), so the result can be installed here.";
+        }
+        return "Install support is unknown; the console's installer will report the real result.";
+      }
+
       function viewConsole() {
         var health = S.health || {};
         var rows = [
@@ -941,6 +983,20 @@
             value: "Status",
             glyph: '<svg viewBox="0 0 24 24"><path d="M4.5 7.2l7.5-3.8 7.5 3.8v9.6L12 20.6l-7.5-3.8z"/><path d="M4.5 7.2l7.5 3.8 7.5-3.8M12 11v9.6"/></svg>',
             action: "packerInfo",
+          }),
+          row({
+            key: "console:firmware",
+            title: "Firmware",
+            desc: "Debug-package install: " + installLabel(),
+            value: firmwareName(),
+            valueClass:
+              installState() === "supported"
+                ? "ok"
+                : installState() === "blocked" || installState() === "unavailable"
+                  ? "warn"
+                  : "",
+            glyph: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>',
+            action: "firmwareInfo",
           }),
           row({
             key: "console:home-app",
@@ -984,8 +1040,8 @@
             action: "rescan",
           }),
         ];
-        return '<div class="section">Connection</div><div class="rows">' + rows.slice(0, 4).join("") + "</div>" +
-          '<div class="section">Library</div><div class="rows">' + rows[4] + rows[5] + "</div>";
+        return '<div class="section">Connection</div><div class="rows">' + rows.slice(0, 5).join("") + "</div>" +
+          '<div class="section">Library</div><div class="rows">' + rows.slice(5).join("") + "</div>";
       }
 
       function viewSettings() {
@@ -1114,7 +1170,7 @@
         openSheet(
           "<h2>Pack " + esc(game.name) + "?</h2>" +
             '<div class="note">No Mac is needed for the console path. It uses the Dump Forge engine on ' +
-            "port 8095; the package installs only where kstuff and ppr-patch support debug packages." +
+            "port 8095. " + esc(packInstallNote()) +
             "</div>" +
             '<div class="actions">' +
             row({ key: "confirm:console", title: "Pack on this console", desc: "Dump Forge engine, no Mac", action: "packConsole", id: id }) +
@@ -1450,7 +1506,64 @@
           });
       }
 
+      function firmwareInfo() {
+        function show() {
+          openSheet(
+            "<h2>Firmware</h2>" +
+              '<div class="note">This console reports <b>' + esc(firmwareName()) + "</b>.</div>" +
+              '<div class="rows">' +
+              row({
+                key: "fw:install",
+                title: "Debug-package install",
+                desc: installReason(),
+                value: installLabel(),
+                valueClass:
+                  installState() === "supported"
+                    ? "ok"
+                    : installState() === "blocked" || installState() === "unavailable"
+                      ? "warn"
+                      : "",
+              }) +
+              "</div>" +
+              '<div class="note">Packing and mounting still work. A package can be moved to a console where kstuff and ppr-patch support it.</div>' +
+              '<div class="actions" style="margin-top:18px">' +
+              row({ key: "fw:ok", title: "OK", action: "close" }) +
+              "</div>",
+            '[data-key="fw:ok"]',
+          );
+        }
+        if (S.health) {
+          show();
+          return;
+        }
+        api("GET", "/api/health")
+          .then(function (data) {
+            S.health = data;
+            show();
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
       function play(id) {
+        var game = null;
+        for (var i = 0; i < S.games.length; i++) if (S.games[i].id === id) game = S.games[i];
+        if (game && game.kind === "pkg" && game.installed !== true) {
+          var state = installState();
+          if (state === "blocked" || state === "unavailable") {
+            openSheet(
+              "<h2>Install is not available here</h2>" +
+                '<div class="note">' + esc(installReason()) + "</div>" +
+                '<div class="note">Packing and mounting still work. A package can be installed on a console where kstuff and ppr-patch support it.</div>' +
+                '<div class="actions" style="margin-top:18px">' +
+                row({ key: "install:close", title: "OK", action: "close" }) +
+                "</div>",
+              '[data-key="install:close"]',
+            );
+            return;
+          }
+        }
         api("POST", "/api/play", { id: id })
           .then(function (data) {
             // 202: the console accepted the package and installs it first.
@@ -1626,6 +1739,7 @@
           else if (name === "homeApp") homeAppMenu();
           else if (name === "homeAppRemove") removeHomeApp();
           else if (name === "packerInfo") packerInfo();
+          else if (name === "firmwareInfo") firmwareInfo();
           else if (name === "editMac") settingsMacSheet();
           else if (name === "saveMac") saveMac();
           else if (name === "settings") {

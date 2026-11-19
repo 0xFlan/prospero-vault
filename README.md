@@ -56,7 +56,9 @@ reports its progress. On this console a 110-file, 85,341,147-byte dump became a
 **39,008,291-byte FPKG**, and the engine verified all 85,341,147 source bytes.
 Installing that package on 13.20 still fails with `0x80BD0005`. On firmware where
 kstuff/ppr-patch supports FPKG install (≤11.60) the same package is the
-candidate, though that install has not been tested here. See
+candidate, though that install has not been tested here. Vault reads the
+firmware at startup and the Console screen reports the install ceiling; on
+12.00–13.60 it explains the block instead of starting a doomed install. See
 `docs/on-console-packing.md` for the evidence and the firmware table.
 
 ## The screens (browser fallback)

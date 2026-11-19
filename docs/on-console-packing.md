@@ -27,6 +27,19 @@ install archive. Driving it keeps Vault from shipping a second, unproven writer.
 
 The pack is real. The install is the part that still fails.
 
+## The interface reports the ceiling
+
+Vault reads the console's firmware at startup through
+`sceKernelGetProsperoSystemSwVersion` (with `uname` as a fallback) and reports it
+in `/api/health` as `firmware`, `install` and `installReason`. On this **13.20**
+console it answers `"firmware":"13.20"` and `"install":"blocked"`.
+
+The Console screen shows that answer, and pressing Play on an uninstalled
+package explains the block instead of starting an install that would spend
+thirty seconds waiting for `0x80BD0005`. The pack sheet says the same thing
+before it starts. The `/api/install` endpoint is still there for a console with
+a custom patch that changes the answer; the UI does not promise one.
+
 ## What does not work
 
 - **Installing on 13.20.** Both Vault's installer and Dump Forge's installer

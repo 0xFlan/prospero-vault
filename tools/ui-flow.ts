@@ -231,6 +231,29 @@ try {
   }
   check("the library draws its tiles", tiles > 0, `${tiles} tiles`);
 
+  // The health answer carries the firmware ceiling. Without waiting for it the
+  // blocked-install path below could race the first poll and look like a pass.
+  let healthReady = false;
+  const healthDeadline = Date.now() + 8000;
+  while (Date.now() < healthDeadline) {
+    healthReady = Boolean(await evaluate(`S.health && S.health.install === "blocked"`));
+    if (healthReady) break;
+    await sleep(200);
+  }
+  check("the interface reads the firmware report", healthReady === true);
+
+  // A package that is not installed must not start an install on firmware
+  // whose public support ends at 11.60. It has to explain, then stop.
+  await evaluate(`document.querySelector('[data-id="PTST00004"]').click()`);
+  const blockedInstall = await evaluate(
+    `(() => { const t = document.getElementById("scrim").textContent || "";
+      return t.includes("Install is not available here") && t.includes("13.20"); })()`,
+  );
+  check("a blocked install is explained before a job starts", blockedInstall === true);
+  await evaluate(
+    `[...document.querySelectorAll('#scrim [data-action]')].find((b) => b.dataset.action === "close").click()`,
+  );
+
   // Press a dump: that is the conversion flow.
   await evaluate(`document.querySelector('[data-id="PTST00003"]').click()`);
   const asked = await evaluate(
