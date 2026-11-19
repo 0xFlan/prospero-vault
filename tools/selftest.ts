@@ -1145,7 +1145,7 @@ async function main(): Promise<void> {
       deployAnswer.ok === false && typeof deployAnswer.detail === "string" && deployAnswer.detail.length > 10,
       JSON.stringify(deployAnswer).slice(0, 90),
     );
-    check("that failure comes back quickly, not as a hang", deployMs < 6000, `${deployMs}ms`);
+    check("an offline deploy answers inside its 1s budget", deployMs < 1000, `${deployMs}ms`);
     const afterDeploy = (await (await fetch(`${recoveryHost}/api/state`)).json()) as any;
     const staleAfter = afterDeploy.games.find((game: any) => game.titleId === "PSTA00091");
     check("the failed deploy leaves an error, not a running job", staleAfter?.state === "error", `${staleAfter?.state}`);
@@ -1298,6 +1298,276 @@ async function main(): Promise<void> {
     );
   } finally {
     race.child.kill();
+  }
+
+  /* ---------------- front 1: the queue and state machine, adversarially ---------------- */
+  const machineStart = Date.now();
+  const machine = await bootApp(
+    "machine",
+    JSON.stringify({ port: 8142, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+    null,
+    8142,
+    { env: { PV_MOCK_HOLD_ID: "PSTA00201", PV_MOCK_HOLD_MS: "1500" } },
+  );
+  const coldStartMs = Date.now() - machineStart;
+  const machineHost = "http://127.0.0.1:8142";
+  const machinePost = (path: string, payload: unknown, signal?: AbortSignal) =>
+    fetch(`${machineHost}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal,
+    });
+  const machineState = async () => (await (await fetch(`${machineHost}/api/state`)).json()) as any;
+  const waitTerminal = async (titleId: string, deadlineMs = 8000): Promise<any> => {
+    const deadline = Date.now() + deadlineMs;
+    let game: any = null;
+    while (Date.now() < deadline) {
+      game = (await machineState()).games.find((entry: any) => entry.titleId === titleId);
+      if (game && game.state !== "building" && game.state !== "installing") return game;
+      await Bun.sleep(120);
+    }
+    return game;
+  };
+  try {
+    await mkdir(join(bootRoot, "machine", "data", "tmp"), { recursive: true });
+    await mkdir(join(FIXTURE, "sce_sys"), { recursive: true });
+    await writeFile(join(FIXTURE, "eboot.bin"), "not a real eboot");
+
+    // Two deploys of the same title, at the same instant.
+    await machinePost("/api/import", {
+      items: [{ titleId: "PSTA00202", title: "Double Deploy", path: FIXTURE, kind: "Game folder", size: 0 }],
+    });
+    await machinePost("/api/build", { titleId: "PSTA00202" });
+    await waitTerminal("PSTA00202");
+    const [firstDeploy, secondDeploy] = await Promise.all([
+      machinePost("/api/deploy", { titleId: "PSTA00202" }),
+      machinePost("/api/deploy", { titleId: "PSTA00202" }),
+    ]);
+    const codes = [firstDeploy.status, secondDeploy.status].sort();
+    check("two deploys at once: one runs, one is refused", codes.join("/") === "200/409", codes.join("/"));
+    const afterDeploys = await waitTerminal("PSTA00202");
+    check("the duelled deploy ends terminal, not installing", afterDeploys?.state !== "installing", `${afterDeploys?.state}`);
+
+    // A deploy while that title is still building.
+    await machinePost("/api/import", {
+      items: [{ titleId: "PSTA00201", title: "Held", path: FIXTURE, kind: "Game folder", size: 0 }],
+    });
+    await machinePost("/api/build", { titleId: "PSTA00201" });
+    await Bun.sleep(150);
+    const duringBuild = await machinePost("/api/deploy", { titleId: "PSTA00201" });
+    check("a deploy while the title is building is refused", duringBuild.status === 409, String(duringBuild.status));
+    const heldDone = await waitTerminal("PSTA00201", 10000);
+    check("the held build still finishes after the refusal", heldDone?.state === "built", `${heldDone?.state}`);
+
+    // A deploy whose client hangs up on a console that never answers: the
+    // request is abandoned, the job must still end terminal, and the server
+    // must keep serving while the connect timeout runs out.
+    await machinePost("/api/settings", { consoleHost: "http://10.255.255.1:8097" });
+    const probeStart = Date.now();
+    const probed = await fetch(`${machineHost}/api/state`);
+    const probedBody = (await probed.json()) as any;
+    const probeMs = Date.now() - probeStart;
+    check(
+      "a black-holed console is probed once and answers offline within 4.5s",
+      probed.status === 200 && probedBody.console.connected === false && probeMs < 4500,
+      `${probeMs}ms ${probedBody.console.mode}`,
+    );
+    const control = new AbortController();
+    const abandoned = machinePost("/api/deploy", { titleId: "PSTA00202" }, control.signal).catch(() => null);
+    await Bun.sleep(300);
+    control.abort();
+    await abandoned;
+    const afterHangup = await waitTerminal("PSTA00202", 10000);
+    check(
+      "a deploy abandoned mid-flight still ends terminal",
+      afterHangup?.state !== "installing" && afterHangup?.state !== "building",
+      `${afterHangup?.state}`,
+    );
+    const stillServing = await fetch(`${machineHost}/api/state`);
+    check("the server keeps serving after that hang-up", stillServing.status === 200, String(stillServing.status));
+    await machinePost("/api/settings", { consoleHost: null });
+
+    // The source folder disappears while the job is queued.
+    const vanishing = join(bootRoot, "vanishing");
+    await mkdir(join(vanishing, "sce_sys"), { recursive: true });
+    await writeFile(join(vanishing, "eboot.bin"), "x");
+    await machinePost("/api/import", {
+      items: [{ titleId: "PSTA00204", title: "Vanishing", path: vanishing, kind: "Game folder", size: 0 }],
+    });
+    await rm(vanishing, { recursive: true, force: true });
+    const goneBuild = await machinePost("/api/build", { titleId: "PSTA00204" });
+    check(
+      "a build whose source is gone is refused with a sentence",
+      goneBuild.status === 422 || goneBuild.status === 400,
+      String(goneBuild.status),
+    );
+    const goneBody = (await goneBuild.json()) as any;
+    check(
+      "that refusal names the missing source",
+      typeof goneBody?.message === "string" && /gone|rescan|source/i.test(goneBody.message),
+      String(goneBody?.message).slice(0, 70),
+    );
+    const goneState = await machineState();
+    const goner = goneState.games.find((entry: any) => entry.titleId === "PSTA00204");
+    check("a source that is gone leaves no running job", goner?.state !== "building", `${goner?.state}`);
+
+    // A stale entry: package removed from disk, console offline.
+    await machinePost("/api/import", {
+      items: [{ titleId: "PSTA00205", title: "Lost Package", path: FIXTURE, kind: "Game folder", size: 0 }],
+    });
+    await machinePost("/api/build", { titleId: "PSTA00205" });
+    const builtLost = await waitTerminal("PSTA00205");
+    if (builtLost?.pkgPath) await rm(builtLost.pkgPath, { force: true });
+    const lostDeploy = await machinePost("/api/deploy", { titleId: "PSTA00205" });
+    const lostGame = await waitTerminal("PSTA00205");
+    check(
+      "a package missing from disk is not reported as sent",
+      lostGame?.state !== "installed",
+      `${lostDeploy.status} ${lostGame?.state}`,
+    );
+
+    // A burst of state requests while a build holds the queue.
+    await machinePost("/api/import", {
+      items: [{ titleId: "PSTA00206", title: "Busy", path: FIXTURE, kind: "Game folder", size: 0 }],
+    });
+    await machinePost("/api/build", { titleId: "PSTA00206" });
+    await Bun.sleep(120);
+    const burstStart = Date.now();
+    const burst = await Promise.all(
+      Array.from({ length: 40 }, async () => {
+        const started = Date.now();
+        const response = await fetch(`${machineHost}/api/state`);
+        await response.arrayBuffer();
+        return { status: response.status, ms: Date.now() - started };
+      }),
+    );
+    const burstMs = Date.now() - burstStart;
+    const slowest = Math.max(...burst.map((entry) => entry.ms));
+    check("forty state requests during a build all answer", burst.every((entry) => entry.status === 200), `${burst.filter((e) => e.status !== 200).length} failed`);
+    check("none of them waits behind the build", slowest < 1500, `slowest ${slowest}ms, burst ${burstMs}ms`);
+
+    // Seeded fuzz: random requests, a truncated body and an aborted request per
+    // round. Every round has to settle terminal within its deadline.
+    let seed = 20261119;
+    const random = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+    const fuzzIds = ["PSTA00211", "PSTA00212", "PSTA00213"];
+    let settled = 0;
+    for (let round = 0; round < 10; round++) {
+      const id = fuzzIds[Math.floor(random() * fuzzIds.length)];
+      const pick = Math.floor(random() * 5);
+      if (pick === 0) {
+        await machinePost("/api/import", {
+          items: [{ titleId: id, title: `Fuzz ${id}`, path: FIXTURE, kind: "Game folder", size: 0 }],
+        });
+      } else if (pick === 1) {
+        await machinePost("/api/build", { titleId: id }).catch(() => null);
+      } else if (pick === 2) {
+        await machinePost("/api/deploy", { titleId: id }).catch(() => null);
+      } else if (pick === 3) {
+        await fetch(`${machineHost}/api/game/${id}`, { method: "DELETE" }).catch(() => null);
+      } else {
+        // A truncated body, sent raw.
+        await fetch(`${machineHost}/api/import`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: '{"items":[{"titleId":"PSTA00211"',
+        }).catch(() => null);
+      }
+      if (random() < 0.4) await fetch(`${machineHost}/api/state`).then((r) => r.arrayBuffer()).catch(() => null);
+      const deadline = Date.now() + 6000;
+      let terminal = false;
+      while (Date.now() < deadline) {
+        const state = await machineState();
+        if (!state.games.some((game: any) => game.state === "building" || game.state === "installing")) {
+          terminal = true;
+          break;
+        }
+        await Bun.sleep(120);
+      }
+      if (terminal) settled++;
+    }
+    check("ten fuzz rounds all settle terminal, none hang", settled === 10, `${settled}/10`);
+
+    /* ---------------- front 2: measured budgets ---------------- */
+    check("cold start to a served /api/state is under 4s", coldStartMs < 4000, `${coldStartMs}ms`);
+    const warmStart = Date.now();
+    for (let i = 0; i < 60; i++) await fetch(`${machineHost}/api/state`).then((r) => r.arrayBuffer());
+    const warmAvg = (Date.now() - warmStart) / 60;
+    check("a warm /api/state averages under 60ms", warmAvg < 60, `${warmAvg.toFixed(1)}ms avg`);
+  } finally {
+    machine.child.kill();
+  }
+
+  // A slow packer: the request path must stay free, and killing the app mid-build
+  // must leave a terminal state after restart, not a phantom job.
+  const slow = await bootApp(
+    "slow",
+    JSON.stringify({
+      port: 8143,
+      consoleHost: null,
+      engine: "command",
+      enginePaths: { command: `sleep 20; printf '\\177' > "{pkg}"` },
+      scanDirs: [],
+    }),
+    null,
+    8143,
+    {},
+  );
+  const slowHost = "http://127.0.0.1:8143";
+  try {
+    await mkdir(join(bootRoot, "slow", "data", "tmp"), { recursive: true });
+    await fetch(`${slowHost}/api/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: [{ titleId: "PSTA00221", title: "Slow", path: FIXTURE, kind: "Game folder", size: 0 }] }),
+    });
+    await fetch(`${slowHost}/api/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ titleId: "PSTA00221" }),
+    });
+    await Bun.sleep(300);
+    const whileBuilding = Date.now();
+    const answered = await fetch(`${slowHost}/api/state`);
+    await answered.arrayBuffer();
+    const stateWhileBuilding = Date.now() - whileBuilding;
+    check("a state request returns while a slow packer runs", answered.status === 200 && stateWhileBuilding < 500, `${stateWhileBuilding}ms`);
+    slow.child.kill();
+    await Bun.sleep(400);
+    const restarted = await bootApp(
+      "slow",
+      JSON.stringify({
+        port: 8144,
+        consoleHost: null,
+        engine: "command",
+        enginePaths: { command: `sleep 20; printf '\\177' > "{pkg}"` },
+        scanDirs: [],
+      }),
+      null,
+      8144,
+      {},
+    );
+    try {
+      const revived = (restarted.state.games as any[]).find((game) => game.titleId === "PSTA00221");
+      check(
+        "a build killed mid-flight comes back terminal, not running",
+        revived?.state !== "building" && revived?.state !== "installing",
+        `${revived?.state}`,
+      );
+      check(
+        "its note says the job was interrupted",
+        /interrupt/i.test(String(revived?.note)),
+        String(revived?.note).slice(0, 70),
+      );
+    } finally {
+      restarted.child.kill();
+    }
+  } finally {
+    slow.child.kill();
   }
 
   // A packer command that fails: the job must end as an error with the code,
