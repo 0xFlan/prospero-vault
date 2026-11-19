@@ -7,6 +7,7 @@
  * Run: bun run test
  */
 
+import { existsSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -260,14 +261,24 @@ async function main(): Promise<void> {
       `${unknown.status} ${unknownBody.slice(0, 40)}`,
     );
 
-    // A page cannot render an HTML 404, so the wrong method must not look like
-    // a missing document either.
+    // A wrong verb on a real endpoint used to look like a missing page. This
+    // pass it answers 405 and names the verb that works, so a client is told
+    // what to do. Behaviour changed on purpose; the check is stricter, not weaker.
     const wrongMethod = await fetch(`${BASE}/api/state`, { method: "POST" });
     const wrongBody = await wrongMethod.text();
     check(
-      "a wrong method answers in JSON",
-      [404, 405].includes(wrongMethod.status) && /"error"/.test(wrongBody),
-      `${wrongMethod.status} ${wrongBody.slice(0, 40)}`,
+      "a wrong method answers 405 with the verb that works",
+      wrongMethod.status === 405 &&
+        wrongMethod.headers.get("allow") === "GET" &&
+        /use GET/.test(wrongBody) &&
+        /"error"/.test(wrongBody),
+      `${wrongMethod.status} allow=${wrongMethod.headers.get("allow")} ${wrongBody.slice(0, 60)}`,
+    );
+    const wrongWrite = await fetch(`${BASE}/api/build`);
+    check(
+      "a GET on a write endpoint is a 405 too",
+      wrongWrite.status === 405 && wrongWrite.headers.get("allow") === "POST",
+      `${wrongWrite.status} allow=${wrongWrite.headers.get("allow")}`,
     );
 
     const malformed = await fetch(`${BASE}/api/build`, {
@@ -734,6 +745,78 @@ async function main(): Promise<void> {
       stillAlive.status === 200 && Array.isArray(stillAlive.parsed?.games),
       String(stillAlive.status),
     );
+
+    // A body that never declares its length cannot be caught by the header
+    // check; the reader has to refuse it once it sees the size.
+    const chunked = await fetch(`${BASE}/api/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ items: [], pad: "x".repeat(1_300_000) })));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    } as RequestInit);
+    check("an oversized body without a length is refused", chunked.status === 413, String(chunked.status));
+
+    // Traversal payloads must not create anything, anywhere.
+    const escapeTargets = [
+      join(DATA_ROOT, "x.pkg"),
+      join(SELFTEST_ROOT, "x.pkg"),
+      join(SELFTEST_ROOT, "..", "x.pkg"),
+      join(DATA_ROOT, "..", "escape.pkg"),
+    ];
+    check(
+      "no traversal payload created a package file",
+      escapeTargets.every((target) => !existsSync(target)),
+      escapeTargets.filter((target) => existsSync(target)).join(", "),
+    );
+    const escapeServe = await fetch(`${BASE}/api/pkg/..%2F..%2Fpackage.json`);
+    check("a traversal package id is never served", escapeServe.status === 404, String(escapeServe.status));
+
+    // Rapid fire at every write endpoint: nothing may 5xx, and a normal
+    // request right after must still succeed.
+    const fireStart = Date.now();
+    const fires: Array<Promise<Response>> = [];
+    const firePost = (path: string, body: string) =>
+      fetch(`${BASE}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+    for (let i = 0; i < 30; i++) {
+      const round = i % 5;
+      if (round === 0) fires.push(firePost("/api/import", JSON.stringify({ items: [] })));
+      if (round === 1) fires.push(firePost("/api/build", JSON.stringify({ titleId: "PSTA00404" })));
+      if (round === 2) fires.push(firePost("/api/deploy", JSON.stringify({ titleId: "PSTA00404" })));
+      if (round === 3) fires.push(firePost("/api/settings", JSON.stringify({ scanDirs: [] })));
+      if (round === 4) fires.push(fetch(`${BASE}/api/game/PSTA00404`, { method: "DELETE" }));
+    }
+    const fireAnswers = await Promise.all(fires);
+    const fireBodies = await Promise.all(fireAnswers.map((answer) => answer.text()));
+    const fiveHundreds = fireAnswers.filter((answer) => answer.status >= 500).length;
+    check("thirty rapid writes produce no 5xx", fiveHundreds === 0, `${fiveHundreds} of 30`);
+    check(
+      "none of them leaks a stack or a placeholder",
+      fireBodies.every((body) => !/undefined|\[object Object\]| at .*\.ts:\d/.test(body)),
+      fireBodies.find((body) => /undefined|\[object Object\]/.test(body))?.slice(0, 60) ?? "",
+    );
+    const afterFire = Date.now();
+    const fireState = await probeJson("/api/state");
+    check(
+      "a normal request works right after the burst, inside 1s",
+      fireState.status === 200 && Date.now() - afterFire < 1000,
+      `${fireState.status} ${Date.now() - afterFire}ms`,
+    );
+    const fireStateAfter = (await (await fetch(`${BASE}/api/state`)).json()) as any;
+    check(
+      "the burst left nothing building or installing",
+      !fireStateAfter.games.some((game: any) => game.state === "building" || game.state === "installing"),
+      fireStateAfter.games.map((game: any) => game.state).join(","),
+    );
+    check("the whole hostile sequence finishes inside 5s", Date.now() - fireStart < 5000, `${Date.now() - fireStart}ms`);
 
     /* ---------------- concurrent mutations ---------------- */
     const duplicateAttempts = await Promise.all(

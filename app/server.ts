@@ -127,6 +127,9 @@ const MAX_BODY_BYTES = 1024 * 1024;
 /** The body stopped arriving: the client stalled, so there is nothing to answer but 408. */
 class BodyTimeout extends Error {}
 
+/** A body past MAX_BODY_BYTES, whether or not it declared its length. */
+class BodyTooLarge extends Error {}
+
 /**
  * A client can declare more bytes than it sends and then go quiet. Left alone,
  * that request holds its handler (and its socket) until the runtime's idle
@@ -137,7 +140,23 @@ const BODY_DEADLINE_MS = Math.max(200, Number(process.env.PV_BODY_DEADLINE_MS ??
 async function body<T>(req: Request): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const read = req.json().catch(() => null);
+    const read = req
+      .text()
+      .then((raw) => {
+        // A chunked body has no declared length, so the up-front Content-Length
+        // check cannot see it. Refuse it here rather than parse a 2 MiB title
+        // list the app would never use.
+        if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) throw new BodyTooLarge("body too large");
+        try {
+          return JSON.parse(raw) as T;
+        } catch {
+          return null;
+        }
+      })
+      .catch((error) => {
+        if (error instanceof BodyTooLarge) throw error;
+        return null;
+      });
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new BodyTimeout("body stopped arriving")), BODY_DEADLINE_MS);
     });
@@ -406,6 +425,28 @@ async function followConsolePull(game: Game, base: string): Promise<void> {
 /* ------------------------------------------------------------------ *
  * Routes
  * ------------------------------------------------------------------ */
+
+/** The verbs each endpoint answers, so a wrong one can say which is right. */
+function allowedMethods(pathname: string): string[] | null {
+  if (pathname === "/api/state" || pathname === "/api/events") return ["GET"];
+  if (
+    pathname === "/api/scan" ||
+    pathname === "/api/import" ||
+    pathname === "/api/build" ||
+    pathname === "/api/deploy" ||
+    pathname === "/api/settings"
+  )
+    return ["POST"];
+  if (pathname.startsWith("/api/game/")) return ["DELETE"];
+  if (
+    pathname.startsWith("/api/progress/") ||
+    pathname.startsWith("/api/ready/") ||
+    pathname.startsWith("/api/pkg/") ||
+    pathname.startsWith("/api/icon/")
+  )
+    return ["GET"];
+  return null;
+}
 
 async function serveStatic(pathname: string): Promise<Response> {
   const name = pathname === "/" ? "index.html" : pathname.replace(/^\//, "");
@@ -948,6 +989,20 @@ async function handle(req: Request, url: URL): Promise<Response> {
   // files gave an unknown endpoint an HTML 404, which the interfaces cannot
   // render, and a wrong method looked like a missing page.
   if (pathname.startsWith("/api/")) {
+    const allowed = allowedMethods(pathname);
+    if (allowed && !allowed.includes(req.method)) {
+      // A known endpoint, wrong verb: 405 with the verb that would work, so a
+      // client is told what to do instead of being told the route is gone.
+      const message = `${req.method} is not how ${pathname} is asked; use ${allowed.join(" or ")}.`;
+      return new Response(JSON.stringify({ error: message, message }), {
+        status: 405,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+          allow: allowed.join(", "),
+        },
+      });
+    }
     return bad(`No endpoint at ${pathname}`, 404);
   }
 
@@ -1022,6 +1077,9 @@ const server = Bun.serve({
     } catch (error) {
       if (error instanceof BodyTimeout) {
         return bad("The body of that request stopped arriving, so it was dropped. Send it again.", 408);
+      }
+      if (error instanceof BodyTooLarge) {
+        return bad("That request is larger than this app accepts.", 413);
       }
       console.error("[request]", url.pathname, error);
       return json({ error: error instanceof Error ? error.message : "Internal error" }, 500);

@@ -432,6 +432,78 @@ try {
 
   try {
     check("the desktop app answers", await reach(`http://127.0.0.1:${APP_PORT}/api/state`, 15000));
+
+    // A state answer that is not JSON must show, not vanish into a loader.
+    // Every state answer fails while this page is open: the boot refresh and
+    // the stream's resync both get the HTML, so the failure has to stay on
+    // screen instead of being overwritten a millisecond later by a retry.
+    const garbageScript = `(() => {
+      const real = window.fetch;
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : input && input.url;
+        if (String(url).includes("/api/state")) {
+          return Promise.resolve(new Response("<html>gateway said no</html>", { status: 200, headers: { "content-type": "text/html" } }));
+        }
+        return real.apply(this, arguments);
+      };
+    })();`;
+    const garbage = (await send("Page.addScriptToEvaluateOnNewDocument", { source: garbageScript })) as any;
+    await send("Page.navigate", { url: `http://127.0.0.1:${APP_PORT}/` });
+    let badToast = "";
+    const badDeadline = Date.now() + 3000;
+    while (Date.now() < badDeadline) {
+      badToast = String(
+        await evaluate(`document.getElementById("toast").hidden ? "" : document.getElementById("toast").textContent`),
+      );
+      // The previous phase's "Reconnected" may still be on screen; wait for the
+      // message this failure earns, not the first toast to appear.
+      if (/could not be read|not.*json|answered something/i.test(badToast)) break;
+      await sleep(200);
+    }
+    const badScreen = String(await evaluate(`document.body.innerText`));
+    check(
+      "a non-JSON state answer is shown to the person",
+      /could not be read|answered something/i.test(`${badToast} ${badScreen}`),
+      `${badToast.slice(0, 50)} | ${badScreen.replace(/\s+/g, " ").slice(0, 60)}`,
+    );
+    const stuck = String(await evaluate(`document.body.textContent`));
+    check("no loader is left spinning after that failure", !/Loading/i.test(stuck), stuck.slice(0, 50));
+    check("the failure never prints a raw exception", !/undefined|\[object Object\]/.test(stuck), stuck.slice(0, 60));
+    if (garbage?.identifier) {
+      await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: garbage.identifier });
+    }
+
+    // A valid answer full of null fields must not paint "undefined".
+    const nullScript = `(() => {
+      const state = {
+        version: "0.0.0", games: [{ titleId: "PSTA09999", title: null, state: null, note: null, size: null,
+          sourceKind: null, category: null, engine: null, pkgPath: null, updatedAt: null }],
+        engines: [], engine: null, console: { connected: false, mode: "offline", host: null },
+        config: { port: 0, consoleHost: null, engine: null, enginePaths: {}, scanDirs: [] },
+        lan: "", pkgDir: "", streams: 0, libraryProblem: null, dataProblem: null, saveProblem: null
+      };
+      const real = window.fetch;
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : input && input.url;
+        if (String(url).includes("/api/state")) {
+          return Promise.resolve(new Response(JSON.stringify(state), { status: 200, headers: { "content-type": "application/json" } }));
+        }
+        return real.apply(this, arguments);
+      };
+    })();`;
+    const nulls = (await send("Page.addScriptToEvaluateOnNewDocument", { source: nullScript })) as any;
+    await send("Page.reload");
+    await sleep(900);
+    const nullPainted = String(await evaluate(`document.body.innerText`));
+    check("a null field never paints undefined or [object Object]", !/undefined|\[object Object\]/.test(nullPainted), nullPainted.slice(0, 70));
+    check("the interface still paints with null fields", nullPainted.length > 30, `${nullPainted.length} chars`);
+    if (nulls?.identifier) {
+      await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: nulls.identifier });
+    }
+    await send("Page.reload");
+    await sleep(900);
+    const cleared = await evaluate(`document.getElementById("toast").hidden === true`);
+    check("the next good answer clears the error", cleared === true);
     await send("Page.navigate", { url: `http://127.0.0.1:${APP_PORT}/` });
     await sleep(800);
 

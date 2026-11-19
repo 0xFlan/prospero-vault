@@ -118,14 +118,24 @@ async function api(method, path, payload, timeoutMs = 15000) {
     }
     const text = await res.text();
     let data = null;
+    let parsed = true;
     try {
       data = text ? JSON.parse(text) : null;
     } catch {
-      data = { error: text };
+      parsed = false;
+      data = null;
     }
     if (!res.ok) {
       const reason = (data && (data.message || data.error)) || `HTTP ${res.status}`;
       throw new Error(reason);
+    }
+    // A 200 that is not this app's JSON is not a state. Handing it back used to
+    // paint undefined fields and surface a raw
+    // "Cannot read properties of undefined (reading 'mode')". Say what happened.
+    if (!parsed || !data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error(
+        "The app answered something that could not be read. Check that it is running the same version, then reload.",
+      );
     }
     return data;
   })();
@@ -153,11 +163,16 @@ async function refresh() {
   refresh.busy = true;
   try {
     const state = await api("GET", "/api/state");
-    S.games = state.games;
-    S.engines = state.engines;
-    S.engine = state.engine;
-    S.console = state.console;
-    S.config = state.config;
+    // Even a well-formed object is checked field by field: a missing console or
+    // games list used to reach the renderer and throw there, outside this catch.
+    S.games = Array.isArray(state.games) ? state.games : [];
+    S.engines = Array.isArray(state.engines) ? state.engines : [];
+    S.engine = state.engine ?? S.engine;
+    S.console =
+      state.console && typeof state.console === "object"
+        ? state.console
+        : { connected: false, mode: "offline", detail: "No console configured" };
+    S.config = state.config && typeof state.config === "object" ? state.config : S.config;
     S.configProblem = state.configProblem || null;
     S.libraryProblem = state.libraryProblem || null;
     S.dataProblem = state.dataProblem || null;
