@@ -502,6 +502,64 @@ try {
     }
     await send("Page.reload");
     await sleep(900);
+
+    // A backend that is down, erroring or silent must say so, not spin.
+    const stateScript = (body: string) => `(() => {
+      const real = window.fetch;
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : input && input.url;
+        if (!String(url).includes("/api/state")) return real.apply(this, arguments);
+        ${body}
+      };
+    })();`;
+    const phase = async (label: string, script: string, expected: RegExp, timeoutMs: number) => {
+      const added = (await send("Page.addScriptToEvaluateOnNewDocument", { source: script })) as any;
+      await send("Page.navigate", { url: `http://127.0.0.1:${APP_PORT}/` });
+      const deadline = Date.now() + timeoutMs;
+      let seen = "";
+      while (Date.now() < deadline) {
+        seen = String(await evaluate(`document.body.innerText`));
+        if (expected.test(seen)) break;
+        await sleep(200);
+      }
+      check(`${label}: the failure is on screen`, expected.test(seen), seen.replace(/\s+/g, " ").slice(0, 70));
+      check(`${label}: no loader is left spinning`, !/Loading/i.test(seen), seen.replace(/\s+/g, " ").slice(0, 50));
+      check(`${label}: no raw exception is painted`, !/undefined|\[object Object\]/.test(seen), seen.replace(/\s+/g, " ").slice(0, 50));
+      if (added?.identifier) await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: added.identifier });
+    };
+    await phase(
+      "an unreachable backend",
+      stateScript('return Promise.reject(new TypeError("Failed to fetch"));'),
+      /Cannot reach the app/i,
+      4000,
+    );
+    await phase(
+      "a 500 answer",
+      stateScript('return Promise.resolve(new Response(JSON.stringify({ error: "The app hit an internal error while reading its library." }), { status: 500, headers: { "content-type": "application/json" } }));'),
+      /internal error/i,
+      4000,
+    );
+    await phase(
+      "a silent backend",
+      stateScript('return new Promise(() => {});'),
+      /did not answer in time/i,
+      18000,
+    );
+    // A fresh document, not a wait on the erroring one: the toast must be gone
+    // and the library must paint from the real backend again.
+    await send("Page.navigate", { url: `http://127.0.0.1:${APP_PORT}/` });
+    await sleep(2500);
+    const recovered = String(await evaluate(`document.body.innerText`));
+    const liveToast = String(
+      await evaluate(
+        `document.getElementById("toast") && !document.getElementById("toast").hidden ? document.getElementById("toast").textContent : ""`,
+      ),
+    );
+    check(
+      "the interface recovers once the backend is healthy",
+      /Library/i.test(recovered) && recovered.length > 100 && !/Cannot reach|did not answer/i.test(liveToast),
+      liveToast.replace(/\s+/g, " ").slice(0, 60) || recovered.replace(/\s+/g, " ").slice(0, 40),
+    );
     const cleared = await evaluate(`document.getElementById("toast").hidden === true`);
     check("the next good answer clears the error", cleared === true);
     await send("Page.navigate", { url: `http://127.0.0.1:${APP_PORT}/` });

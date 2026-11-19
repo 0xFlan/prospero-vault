@@ -129,6 +129,9 @@ class BodyTimeout extends Error {}
 
 /** A body past MAX_BODY_BYTES, whether or not it declared its length. */
 class BodyTooLarge extends Error {}
+/** A body that arrived but is not JSON. Told apart from a missing one, so the
+ * answer is about the body rather than about a missing field inside it. */
+class BadJSON extends Error {}
 
 /**
  * A client can declare more bytes than it sends and then go quiet. Left alone,
@@ -150,11 +153,11 @@ async function body<T>(req: Request): Promise<T | null> {
         try {
           return JSON.parse(raw) as T;
         } catch {
-          return null;
+          throw new BadJSON("body is not json");
         }
       })
       .catch((error) => {
-        if (error instanceof BodyTooLarge) throw error;
+        if (error instanceof BodyTooLarge || error instanceof BadJSON) throw error;
         return null;
       });
     const deadline = new Promise<never>((_, reject) => {
@@ -584,12 +587,18 @@ async function handle(req: Request, url: URL): Promise<Response> {
       const sourcePath = asText(item.path);
       if (!titleId || !sourcePath || !safeId(titleId)) continue;
       if (findGame(titleId)) continue;
+      // Anything that is not text is replaced, never coerced: String({}) sent
+      // "[object Object]" straight to the game grid, and Number("abc") stored
+      // a NaN that JSON turned into null.
+      const title = asText(item.title) || titleId;
+      const kind = asText(item.kind) || "Unknown";
+      const size = Number(item.size);
       games.push({
         titleId,
-        title: String(item.title ?? titleId),
+        title,
         sourcePath,
-        sourceKind: String(item.kind ?? "Unknown"),
-        sizeBytes: Number(item.size ?? 0),
+        sourceKind: kind,
+        sizeBytes: Number.isFinite(size) && size > 0 ? size : 0,
         state: "dumped",
         pkgPath: null,
         pkgSize: 0,
@@ -753,6 +762,12 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const wanted = asText(payload?.titleId);
     const game = wanted ? findGame(wanted) : undefined;
     if (!game) return bad("Unknown title", 404);
+    // A rebuild replaces the package under the install's feet; the console
+    // would receive bytes from two different builds. Checked before the file,
+    // because a first build has no package yet and would otherwise be told to
+    // "build the package first" while it is building it.
+    if (game.state === "building" || pendingBuilds.has(game.titleId))
+      return bad("That package is being rebuilt. Wait for the build to finish, then send it.", 409);
     if (!game.pkgPath || !existsSync(game.pkgPath)) return bad("Build the package first", 409);
     // Two presses on one tile sent two install requests: the console ran one
     // while the second overwrote the job status, and two followers raced over
@@ -1080,6 +1095,9 @@ const server = Bun.serve({
       }
       if (error instanceof BodyTooLarge) {
         return bad("That request is larger than this app accepts.", 413);
+      }
+      if (error instanceof BadJSON) {
+        return bad("That request body is not valid JSON. Check what was sent and try again.", 400);
       }
       console.error("[request]", url.pathname, error);
       return json({ error: error instanceof Error ? error.message : "Internal error" }, 500);

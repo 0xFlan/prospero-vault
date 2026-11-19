@@ -83,7 +83,15 @@ function toast(message, isError) {
 // alive while nothing in it could update.
 function within(promise, ms, message) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message || "The app did not answer in time.")), ms);
+    const timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            message || "The app did not answer in time. It may be busy or stopped — check that it is running, then reload this page.",
+          ),
+        ),
+      ms,
+    );
     promise.then(
       (value) => {
         clearTimeout(timer);

@@ -828,6 +828,42 @@ async function main(): Promise<void> {
       String(stillAlive.status),
     );
 
+    /* ---------------- pass 19: untrusted metadata and transport ---------------- */
+    const hugeTitle = "\ud83c\udfae".repeat(600);
+    const hugeImport = await post("/api/import", {
+      items: [{ titleId: "PSTA00051", title: hugeTitle, kind: {}, size: "not a number", path: FIXTURE }],
+    });
+    check("a 4KB unicode title is accepted without failing", hugeImport.status === 200, String(hugeImport.status));
+    const hugeGame = ((await getState()) as any).games.find((game: any) => game.titleId === "PSTA00051");
+    check("that title is stored as text, not [object Object]", hugeGame?.title === hugeTitle, String(hugeGame?.title).slice(0, 40));
+    check("a non-string kind falls back to Unknown", hugeGame?.sourceKind === "Unknown", String(hugeGame?.sourceKind));
+    check("a non-numeric size becomes zero", hugeGame?.sizeBytes === 0, String(hugeGame?.sizeBytes));
+    check("the state still serialises with a 4KB title", JSON.stringify(await getState()).includes("\ud83c\udfae"));
+    await fetch(`${BASE}/api/game/PSTA00051`, { method: "DELETE" });
+
+    // A body that stops mid-object is a named 400, not a crash or a hang.
+    const truncatedBody = await fetch(`${BASE}/api/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"items": [{"titleId": "PSTA00052"',
+    });
+    const truncatedText = await truncatedBody.text();
+    check("a truncated JSON body is a named 4xx", truncatedBody.status === 400 && /json|body|unexpected|end/i.test(truncatedText), `${truncatedBody.status} ${truncatedText.slice(0, 60)}`);
+    check("the truncated body never prints a stack", !/\bat .*\.ts:\d|SyntaxError/.test(truncatedText), truncatedText.slice(0, 60));
+
+    // A client that sends half a request and stops must not hold the app.
+    const halfRequest = await Bun.connect({
+      hostname: "127.0.0.1",
+      port: Number(new URL(BASE).port),
+      socket: { data() {}, open() {}, close() {} },
+    });
+    halfRequest.write("POST /api/import HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{\"items\": [");
+    const stalledStart = Date.now();
+    const duringStall = await fetch(`${BASE}/api/state`, { signal: AbortSignal.timeout(2000) });
+    const stallMs = Date.now() - stalledStart;
+    halfRequest.end();
+    check("a stalled client does not block other requests", duringStall.status === 200 && stallMs < 2000, `${duringStall.status} ${stallMs}ms`);
+
     // A body that never declares its length cannot be caught by the header
     // check; the reader has to refuse it once it sees the size.
     const chunked = await fetch(`${BASE}/api/import`, {
@@ -1989,6 +2025,74 @@ async function main(): Promise<void> {
     check("the soak library is empty, matching disk", Array.isArray(finalState.games) && finalState.games.length === 0, `${finalState.games?.length} left`);
   } finally {
     soak.child.kill();
+  }
+
+  /* ---------------- pass 19: a build and an install in flight ---------------- */
+  const transport = await bootApp(
+    "transport",
+    JSON.stringify({ port: 8148, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
+    null,
+    8148,
+    { env: { PV_MOCK_HOLD_ID: "PSTA00061", PV_MOCK_HOLD_MS: "1800", PV_INSTALL_DELAY_MS: "1200" } },
+  );
+  const transportHost = "http://127.0.0.1:8148";
+  try {
+    const tPost = (path: string, payload: unknown) =>
+      fetch(`${transportHost}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    const tGame = async () =>
+      ((await (await fetch(`${transportHost}/api/state`)).json()) as any).games.find((game: any) => game.titleId === "PSTA00061");
+    await tPost("/api/import", { items: [{ titleId: "PSTA00061", title: "Transport", path: FIXTURE, kind: "Game folder", size: 0 }] });
+    await tPost("/api/build", { titleId: "PSTA00061" });
+    for (let i = 0; i < 40; i++) {
+      const game = await tGame();
+      if (game?.state === "building") break;
+      await Bun.sleep(50);
+    }
+    const duringBuild = await tPost("/api/deploy", { titleId: "PSTA00061" });
+    const duringBuildText = await duringBuild.text();
+    check(
+      "deploying while that title rebuilds is refused by name",
+      duringBuild.status === 409 && /rebuil/i.test(duringBuildText),
+      `${duringBuild.status} ${duringBuildText.slice(0, 60)}`,
+    );
+    let ready: any = null;
+    for (let i = 0; i < 80; i++) {
+      ready = await tGame();
+      if (ready && ready.state !== "building") break;
+      await Bun.sleep(60);
+    }
+    check("the build still ends normally after that refusal", ready?.state === "built", `${ready?.state}`);
+
+    // The person closes the tab mid-send: the install must finish on its own.
+    const leaving = new AbortController();
+    const deploy = fetch(`${transportHost}/api/deploy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ titleId: "PSTA00061" }),
+      signal: leaving.signal,
+    }).catch(() => null);
+    await Bun.sleep(120);
+    leaving.abort();
+    await deploy;
+    let installed: any = null;
+    for (let i = 0; i < 100; i++) {
+      installed = await tGame();
+      if (installed && installed.state !== "installing") break;
+      await Bun.sleep(60);
+    }
+    check(
+      "an aborted deploy request still ends terminal",
+      installed?.state === "installed",
+      `${installed?.state}`,
+    );
+    const afterTransport = await fetch(`${transportHost}/api/state`);
+    check("a normal request works after the aborted install", afterTransport.status === 200, String(afterTransport.status));
+  } finally {
+    transport.child.kill();
   }
 
   /* ---------------- front 1: disk and child-process faults ---------------- */
