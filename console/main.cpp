@@ -3305,7 +3305,26 @@ void handle(int fd) {
       packaged = known && std::strcmp(g_titles[index].kind, "pkg") == 0;
       pthread_mutex_unlock(&g_lock);
     }
+    // A dump can live only on the Mac. When the Mac already holds the finished
+    // package, this console does not need the title in its own scan: it can
+    // fetch the package and learn the title from it. Refusing here made Send to
+    // PS5 fail with "Unknown title" for every dump that was never copied onto
+    // the console, which is the one case the Mac side exists for.
+    bool ready_on_mac = false;
     if (!known) {
+      char mac_now[96] = {0};
+      pthread_mutex_lock(&g_lock);
+      std::snprintf(mac_now, sizeof mac_now, "%s", g_mac);
+      pthread_mutex_unlock(&g_lock);
+      if (mac_now[0]) {
+        char ready_url[256];
+        std::snprintf(ready_url, sizeof ready_url, "http://%s/api/ready/%s", mac_now, id);
+        char probe[256] = {0};
+        ready_on_mac = http_call("GET", ready_url, nullptr, probe, sizeof probe) == 200;
+        if (ready_on_mac) log_fmt("convert: %s is not in the scan, but the Mac holds its package", id);
+      }
+    }
+    if (!known && !ready_on_mac) {
       reply(fd, 400, "{\"ok\":false,\"message\":\"Unknown title\"}");
       ::close(fd);
       return;

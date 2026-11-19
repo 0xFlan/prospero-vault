@@ -490,6 +490,9 @@ Verified on this Mac:
   `param.sfo` parsing, build, serving, `Range` resume, deploy, a 60-cycle soak,
   and a mixed good/bad dump soak across a restart, and that a build leaves no
   temporary files or scratch folder behind
+- `bun run check:gate` — 30 checks: the real payload built for this Mac on the
+  LAN, preflight passing, both delivery paths building byte-identical packages,
+  an unreachable console stopping the run, and the gate again after a restart
 - `bun run check:dumps` — 38 checks over synthesized PkgEditor-style, uppercase,
   DLC, 240 MB-payload, missing-metadata, no-eboot and bad-content-id dumps,
   every one through scan → import → build
@@ -507,6 +510,68 @@ also start from Settings, so a refusal is unambiguous. Packages themselves are
 real now: the bundled `acpack` builds them with the managed SHA3 patch, and the
 validator accepts every shape in `bun run check:dumps` — but none of those has
 been installed on a console yet.
+
+## Start here: the hardware gate
+
+Before a dump is touched, one command reports every precondition for both
+delivery paths, with the reason and the fix for each failure:
+
+```bash
+bun run dev                       # the companion Mac app
+bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097
+```
+
+```
+  PASS  companion Mac: app answers /api/state                   http://127.0.0.1:8090
+  PASS  companion Mac: a real packer is available               bundled packer (or a configured command)
+  PASS  companion Mac: advertises a LAN address (not loopback)  http://192.168.4.26:8090
+  PASS  companion Mac: answers over that LAN address            http://192.168.4.26:8090/api/state → 200
+  PASS  dump: readable folder with metadata and eboot           /dumps/PPSA01234-app
+  PASS  console: address configured                             192.168.4.100:8097
+  PASS  console: payload answers /api/health                    payload 0.11.0 at http://192.168.4.100:8097
+  PASS  console: enough free space                              109.3 GB free (a package needs its own size plus headroom)
+  PASS  console-direct: console lists this dump                 PPSA01234 is in the console's scan
+
+9/9 preconditions passed
+```
+
+Exit code is `0` when every line passed, `1` when one did not, `2` for a usage
+mistake. A failing line prints the missing piece and what to do — for example
+`no answer from http://192.168.4.100:8097/api/health — load
+console/build/prospero-vault.elf with elfldr, then check the address`. Nothing
+is built while a precondition fails, and each run writes its checks and outcome
+to `data/last-gate.json`.
+
+`--path console` requires the dump to be on the console already (copy it to
+`/data/prospero-vault/Games`, then rescan there). `--path mac` requires the dump
+here; the console learns the title from the package it fetches, so it does not
+need the dump in its own scan. Omitting `--path` reports both.
+
+### Console-direct (the dump is on the console)
+
+1. copy the dump into `/data/prospero-vault/Games/` on the console, rescan there
+2. `bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097 --path console --run`
+3. the gate starts the console's Convert job, the Mac pulls the dump, builds, and
+   the console downloads the package; the run ends with
+   `console 202; done — Package received · 1.0 MB`
+4. the package is `/data/prospero-vault/Games/PPSA01234.pkg` on the console
+
+Without `--run`, press Convert on the console itself after the gate passes — the
+same path, started from its own screen.
+
+### Companion Mac (the dump is on the Mac)
+
+1. `bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097 --path mac --run`
+2. the Mac imports and builds, then asks the console to fetch the package:
+   `deploy 200 {"ok":true,"detail":"The console is fetching the package.",…}`
+3. the console pulls it over the LAN, rescans, and the tile appears
+
+A Mac-held dump is not required to be in the console's scan: the payload accepts
+the job because the Mac already holds the finished package. `bun run check:gate`
+exercises exactly this, with the real payload source built for this Mac on the
+LAN, the dump built once through each path, byte comparison between the Mac's
+package and the console's copy, a broken console address that must stop the run,
+and the whole gate again after a Mac restart.
 
 ## Point it at a real dump
 
