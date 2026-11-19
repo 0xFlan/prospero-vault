@@ -490,9 +490,11 @@ Verified on this Mac:
   `param.sfo` parsing, build, serving, `Range` resume, deploy, a 60-cycle soak,
   a mixed good/bad dump soak across a restart, the cross-site guard, loopback
   binding, and that a build leaves no temporary files or scratch folder behind
-- `bun run check:app` — 16 checks: the built bundle launched with no Bun or
+- `bun run check:app` — 28 checks: the built bundle launched with no Bun or
   dotnet on PATH, serving API and UI, rejecting cross-origin mutations, building
-  a real package, and refusing off-host connections in loopback mode
+  a real package, driving the menu handlers (login item install/remove through
+  `launchctl`, console URL, quit), and refusing off-host connections in
+  loopback mode
 - `bun run check:gate` — 43 checks: the real payload built for this Mac on the
   LAN, preflight passing with all 14 lines, both delivery paths building
   byte-identical packages, each new precondition broken in turn with no job
@@ -925,8 +927,17 @@ dotnet), and verifies: it serves `/api/state` and the console UI, reports its
 bundled packer as the engine, rejects a cross-origin mutation with `403` while
 accepting the same-origin and native ones, imports and builds a retail-shaped
 dump into a real `\x7FFIH` package, and in `PV_BIND=loopback` mode answers on
-`127.0.0.1` while refusing the LAN address. The menu bar item itself needs a
-human to click; it is not covered by that check.
+`127.0.0.1` while refusing the LAN address.
+
+It also drives the menu handlers through the bundle itself:
+`--action login-on` writes and loads `~/Library/LaunchAgents/com.prospero.vault.plist`
+(checked with `plutil -lint` and `launchctl list`), `--action login-off`
+unloads and removes it and is harmless when repeated, `--action url` returns the
+address **Open Prospero Vault** uses and that address answers `200`, and
+`--action quit` stops the instance so the port closes and no bundled server
+survives. These call the same functions the menu items call; the menu itself is
+not clicked by the check, so the status item drawing and mouse targets remain a
+human step.
 
 ### Still hardware-only
 

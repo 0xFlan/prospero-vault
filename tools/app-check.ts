@@ -128,7 +128,74 @@ async function main(): Promise<void> {
     check("the package is real", false, "no package path");
   }
 
-  app.kill();
+  // The menu's three controls, driven through the same handlers the menu calls.
+  const realHome = process.env.HOME || "/Users/flan";
+  const agent = join(realHome, "Library/LaunchAgents/com.prospero.vault.plist");
+  const actionEnv = { HOME: home, PATH: "/usr/bin:/bin", PV_PORT: String(port) };
+  const action = (name: string) => {
+    const result = Bun.spawnSync({ cmd: [EXEC, "--action", name], env: actionEnv });
+    return { status: result.exitCode, out: result.stdout.toString().trim() };
+  };
+  const lanFree = async (waitMs = 8000) => {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      try {
+        await fetch(`http://127.0.0.1:${port}/api/state`, { signal: AbortSignal.timeout(500) });
+      } catch {
+        return true;
+      }
+      await Bun.sleep(150);
+    }
+    return false;
+  };
+
+  try {
+    const on = action("login-on");
+    check("menu handler: Launch at Login installs the agent", on.status === 0 && existsSync(agent), on.out.slice(0, 120));
+    const lint = Bun.spawnSync(["plutil", "-lint", agent]);
+    check("the login item is a valid plist", lint.exitCode === 0, lint.stdout.toString().trim());
+    const loaded = Bun.spawnSync(["launchctl", "list", "com.prospero.vault"]);
+    check("launchctl accepts the login item", loaded.exitCode === 0, String(loaded.exitCode));
+
+    const off = action("login-off");
+    check("menu handler: toggling off removes the agent", off.status === 0 && !existsSync(agent), off.out.slice(0, 120));
+    const gone = Bun.spawnSync(["launchctl", "list", "com.prospero.vault"]);
+    check("and nothing is left loaded", gone.exitCode !== 0, String(gone.exitCode));
+    const offAgain = action("login-off");
+    check("toggling off again is harmless", offAgain.status === 0 && !existsSync(agent), String(offAgain.status));
+    action("login-on");
+    const onAgain = action("login-on");
+    const lintAgain = Bun.spawnSync(["plutil", "-lint", agent]);
+    check("installing twice still leaves one valid item", onAgain.status === 0 && lintAgain.exitCode === 0, String(onAgain.status));
+    action("login-off");
+
+    const url = action("url");
+    let consoleUrl = "";
+    try {
+      consoleUrl = String(JSON.parse(url.out).url);
+    } catch {
+      /* reported below */
+    }
+    check("menu handler: Open resolves the live console URL", url.status === 0 && consoleUrl === `http://127.0.0.1:${port}/`, consoleUrl);
+    let consoleStatus = 0;
+    try {
+      consoleStatus = (await fetch(consoleUrl, { signal: AbortSignal.timeout(5000) })).status;
+    } catch {
+      /* reported below */
+    }
+    check("and that URL answers from the running app", consoleStatus === 200, String(consoleStatus));
+
+    const quit = action("quit");
+    check("menu handler: Quit stops the instance", quit.status === 0, quit.out.slice(0, 120));
+    check("and the port stops answering", await lanFree(), `:${port}`);
+    const pid = Number(quit.out.match(/pid (\d+)/)?.[1] ?? 0);
+    const ps = pid ? Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)]).stdout.toString().trim() : "";
+    const pidGone = pid > 0 && (ps === "" || ps.startsWith("Z"));
+    check("and no bundled server process survives", pidGone && Bun.spawnSync(["pgrep", "-f", `${BUNDLE}/Contents/Resources/bun app/server.ts`]).exitCode !== 0);
+  } finally {
+    if (existsSync(agent)) action("login-off");
+    app.kill();
+  }
 
   const loopPort = freePort();
   const loop = await launch(loopPort, home, "loopback");
