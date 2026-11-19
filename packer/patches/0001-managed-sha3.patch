@@ -1,0 +1,346 @@
+diff --git a/src/LibProsperoPkg/PFS/Compression/ProsperoPfsDigest.cs b/src/LibProsperoPkg/PFS/Compression/ProsperoPfsDigest.cs
+index 375e822..4b04e77 100644
+--- a/src/LibProsperoPkg/PFS/Compression/ProsperoPfsDigest.cs
++++ b/src/LibProsperoPkg/PFS/Compression/ProsperoPfsDigest.cs
+@@ -11,6 +11,7 @@
+ using System;
+ using System.Buffers.Binary;
+ using System.Security.Cryptography;
++using LibProsperoPkg.Util;
+ 
+ namespace LibProsperoPkg.PFS.Compression;
+ 
+@@ -31,9 +32,10 @@ public static class ProsperoPfsDigest
+     public const int DigestLength = 32;
+ 
+     /// <summary>
+-    /// Gets a value indicating whether the host runtime and operating system provide SHA3-256.
++    /// Gets a value indicating whether SHA3-256 can be computed. The managed sponge in
++    /// <see cref="ManagedSha3"/> covers hosts (macOS) where the runtime has no SHA-3.
+     /// </summary>
+-    public static bool IsSupported => SHA3_256.IsSupported;
++    public static bool IsSupported => true;
+ 
+     /// <summary>
+     /// Computes the SHA3-256 digest of a single PFS block's <b>uncompressed</b> bytes, matching the
+@@ -44,8 +46,9 @@ public static class ProsperoPfsDigest
+     /// <exception cref="PlatformNotSupportedException">SHA3-256 is unavailable on this host.</exception>
+     public static byte[] ComputeBlockDigest(ReadOnlySpan<byte> uncompressedBlock)
+     {
+-        EnsureSupported();
+-        return SHA3_256.HashData(uncompressedBlock);
++        return SHA3_256.IsSupported
++            ? SHA3_256.HashData(uncompressedBlock)
++            : ManagedSha3.Hash(uncompressedBlock);
+     }
+ 
+     /// <summary>
+@@ -57,8 +60,9 @@ public static class ProsperoPfsDigest
+     /// <exception cref="PlatformNotSupportedException">SHA3-256 is unavailable on this host.</exception>
+     public static int ComputeBlockDigest(ReadOnlySpan<byte> data, Span<byte> destination)
+     {
+-        EnsureSupported();
+-        return SHA3_256.HashData(data, destination);
++        byte[] digest = SHA3_256.IsSupported ? SHA3_256.HashData(data) : ManagedSha3.Hash(data);
++        digest.CopyTo(destination);
++        return digest.Length;
+     }
+ 
+     /// <summary>
+@@ -71,18 +75,13 @@ public static class ProsperoPfsDigest
+     {
+         if (expected.Length != DigestLength)
+             return false;
+-        EnsureSupported();
+-        Span<byte> actual = stackalloc byte[DigestLength];
+-        SHA3_256.HashData(uncompressedBlock, actual);
++        byte[] actual = SHA3_256.IsSupported
++            ? SHA3_256.HashData(uncompressedBlock)
++            : ManagedSha3.Hash(uncompressedBlock);
+         return CryptographicOperations.FixedTimeEquals(actual, expected);
+     }
+ 
+-    private static void EnsureSupported()
+-    {
+-        if (!SHA3_256.IsSupported)
+-            throw new PlatformNotSupportedException(
+-                "SHA3-256 is required for the PS5 PFSv3 compression format but is not available on this host.");
+-    }
++
+ 
+     /// <summary>The length, in bytes, of the header parameter slice (<c>container[0x08..0x20]</c>) the file digest hashes.</summary>
+     public const int FileDigestHeaderParamsLength = 0x18;
+@@ -117,8 +116,6 @@ public static class ProsperoPfsDigest
+             throw new ArgumentException(
+                 $"headerParams must be exactly {FileDigestHeaderParamsLength} bytes (container[0x08..0x20]).",
+                 nameof(headerParams));
+-        EnsureSupported();
+-
+         // header32: {u32 1, u32 blockSize, u32 param0C, u32 0(pad), u64 param10, u64 uncompressedSize}.
+         Span<byte> header32 = stackalloc byte[32];
+         BinaryPrimitives.WriteUInt32LittleEndian(header32, 1u);
+@@ -126,12 +123,12 @@ public static class ProsperoPfsDigest
+         // header32[12..16] stays zero (alignment padding).
+         headerParams[8..].CopyTo(header32[16..]);  // param10 (0x10) + uncompressedSize (0x18)
+ 
+-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA3_256);
+-        hash.AppendData(header32);
+-        hash.AppendData(shuffleSection);
+-        hash.AppendData(boundarySection);
+-        hash.AppendData(blockHashSection);
+-        return hash.GetHashAndReset();
++        var hash = new ManagedSha3();
++        hash.Append(header32);
++        hash.Append(shuffleSection);
++        hash.Append(boundarySection);
++        hash.Append(blockHashSection);
++        return hash.Finish();
+     }
+ 
+     /// <summary>
+diff --git a/src/LibProsperoPkg/PFS/ProsperoOuterPfsSignature.cs b/src/LibProsperoPkg/PFS/ProsperoOuterPfsSignature.cs
+index 44c13ed..7fb0491 100644
+--- a/src/LibProsperoPkg/PFS/ProsperoOuterPfsSignature.cs
++++ b/src/LibProsperoPkg/PFS/ProsperoOuterPfsSignature.cs
+@@ -55,10 +55,9 @@ public static class ProsperoOuterPfsSignature
+     /// </summary>
+     public static byte[] ComputeBlockHash(ReadOnlySpan<byte> plaintextBlock)
+     {
+-        if (!SHA3_256.IsSupported)
+-            throw new PlatformNotSupportedException(
+-                "SHA3-256 is required for the PS5 outer-PFS block hash but is not available on this platform/runtime.");
+-        return SHA3_256.HashData(plaintextBlock);
++        return SHA3_256.IsSupported
++            ? SHA3_256.HashData(plaintextBlock)
++            : LibProsperoPkg.Util.ManagedSha3.Hash(plaintextBlock);
+     }
+ 
+     /// <summary>
+@@ -84,14 +83,10 @@ public static class ProsperoOuterPfsSignature
+         if (superblock.Length < SuperblockIcvCoverage)
+             throw new ArgumentException(
+                 $"Superblock must be at least 0x{SuperblockIcvCoverage:x} bytes to compute the ICV.", nameof(superblock));
+-        if (!SHA3_256.IsSupported)
+-            throw new PlatformNotSupportedException(
+-                "SHA3-256 is required for the PS5 outer-PFS superblock ICV but is not available on this platform/runtime.");
+-
+         Span<byte> region = stackalloc byte[SuperblockIcvCoverage];
+         superblock[..SuperblockIcvCoverage].CopyTo(region);
+         region.Slice(SuperblockIcvOffset, HashLength).Clear();
+-        return SHA3_256.HashData(region);
++        return SHA3_256.IsSupported ? SHA3_256.HashData(region) : LibProsperoPkg.Util.ManagedSha3.Hash(region);
+     }
+ 
+     /// <summary>
+diff --git a/src/LibProsperoPkg/PKG/ProsperoImageDigests.cs b/src/LibProsperoPkg/PKG/ProsperoImageDigests.cs
+index da5201a..3f56531 100644
+--- a/src/LibProsperoPkg/PKG/ProsperoImageDigests.cs
++++ b/src/LibProsperoPkg/PKG/ProsperoImageDigests.cs
+@@ -156,10 +156,9 @@ public static class ProsperoImageDigests
+     /// </summary>
+     public static byte[] Sha3_256(ReadOnlySpan<byte> data)
+     {
+-        if (!SHA3_256.IsSupported)
+-            throw new PlatformNotSupportedException(
+-                "SHA3-256 is required for PS5 finalized-image digests but is not available on this platform/runtime.");
+-        return SHA3_256.HashData(data);
++        return SHA3_256.IsSupported
++            ? SHA3_256.HashData(data)
++            : LibProsperoPkg.Util.ManagedSha3.Hash(data);
+     }
+ 
+     /// <summary>
+diff --git a/src/LibProsperoPkg/Util/Crypto.cs b/src/LibProsperoPkg/Util/Crypto.cs
+index 24ef72d..325240e 100644
+--- a/src/LibProsperoPkg/Util/Crypto.cs
++++ b/src/LibProsperoPkg/Util/Crypto.cs
+@@ -125,19 +125,17 @@ public static class Crypto
+     /// </summary>
+     public static byte[] Sha3_256(byte[] data)
+     {
+-        if (!SHA3_256.IsSupported)
+-            throw new PlatformNotSupportedException(
+-                "SHA3-256 is required for PS5 PFS key derivation and digests but is not available on this platform/runtime.");
++        // macOS has no OS SHA-3 for .NET to call, so fall back to the managed
++        // sponge rather than refusing to build a package at all.
++        if (!SHA3_256.IsSupported) return ManagedSha3.Hash(data);
+         return SHA3_256.HashData(data);
+     }
+ 
+     /// <summary>Computes the SHA3-256 hash over the whole stream (used for PS5 CNT body/entry digests).</summary>
+     public static byte[] Sha3_256(Stream data)
+     {
+-        if (!SHA3_256.IsSupported)
+-            throw new PlatformNotSupportedException(
+-                "SHA3-256 is required for PS5 PFS digests but is not available on this platform/runtime.");
+         data.Position = 0;
++        if (!SHA3_256.IsSupported) return ManagedSha3.Hash(data);
+         return SHA3_256.HashData(data);
+     }
+ 
+diff --git a/src/LibProsperoPkg/Util/ManagedSha3.cs b/src/LibProsperoPkg/Util/ManagedSha3.cs
+new file mode 100644
+index 0000000..2df9165
+--- /dev/null
++++ b/src/LibProsperoPkg/Util/ManagedSha3.cs
+@@ -0,0 +1,160 @@
++// LibProsperoPkg - A library for building and inspecting PS5 packages.
++// Copyright (C) 2026 SvenGDK
++//
++// Managed SHA3-256 (FIPS 202). .NET delegates SHA-3 to the OS and macOS has no
++// implementation at all, so every package build there used to fail before the
++// first block. This is a straight Keccak-f[1600] sponge with a 136-byte rate.
++#nullable disable
++using System;
++using System.IO;
++
++namespace LibProsperoPkg.Util;
++
++public sealed class ManagedSha3
++{
++    private const int Rate = 136; // 1088-bit rate for a 256-bit digest
++    private static readonly ulong[] RoundConstants =
++    {
++        0x0000000000000001UL, 0x0000000000008082UL, 0x800000000000808aUL, 0x8000000080008000UL,
++        0x000000000000808bUL, 0x0000000080000001UL, 0x8000000080008081UL, 0x8000000000008009UL,
++        0x000000000000008aUL, 0x0000000000000088UL, 0x0000000080008009UL, 0x000000008000000aUL,
++        0x000000008000808bUL, 0x800000000000008bUL, 0x8000000000008089UL, 0x8000000000008003UL,
++        0x8000000000008002UL, 0x8000000000000080UL, 0x000000000000800aUL, 0x800000008000000aUL,
++        0x8000000080008081UL, 0x8000000000008080UL, 0x0000000080000001UL, 0x8000000080008008UL,
++    };
++
++    // Rotation offsets, indexed x + 5y.
++    private static readonly int[] Rotations =
++    {
++         0,  1, 62, 28, 27,
++        36, 44,  6, 55, 20,
++         3, 10, 43, 25, 39,
++        41, 45, 15, 21,  8,
++        18,  2, 61, 56, 14,
++    };
++
++    private readonly ulong[] state = new ulong[25];
++    private readonly byte[] block = new byte[Rate];
++    private int buffered;
++
++    public static byte[] Hash(byte[] data) => Hash(data.AsSpan());
++
++    public static byte[] Hash(ReadOnlySpan<byte> data)
++    {
++        var hasher = new ManagedSha3();
++        hasher.Append(data);
++        return hasher.Finish();
++    }
++
++    public static byte[] Hash(Stream data)
++    {
++        var hasher = new ManagedSha3();
++        var buffer = new byte[81920];
++        int read;
++        while ((read = data.Read(buffer, 0, buffer.Length)) > 0)
++            hasher.Append(buffer.AsSpan(0, read));
++        return hasher.Finish();
++    }
++
++    public static byte[] Hash(Stream data, long start, long length)
++    {
++        data.Position = start;
++        var hasher = new ManagedSha3();
++        var buffer = new byte[81920];
++        long left = length;
++        while (left > 0)
++        {
++            int want = (int)Math.Min(buffer.Length, left);
++            int read = data.Read(buffer, 0, want);
++            if (read <= 0) break;
++            hasher.Append(buffer.AsSpan(0, read));
++            left -= read;
++        }
++        return hasher.Finish();
++    }
++
++    public void Append(ReadOnlySpan<byte> data)
++    {
++        while (data.Length > 0)
++        {
++            int take = Math.Min(Rate - buffered, data.Length);
++            data.Slice(0, take).CopyTo(block.AsSpan(buffered));
++            buffered += take;
++            data = data.Slice(take);
++            if (buffered == Rate)
++            {
++                Absorb(block);
++                Permute();
++                // The next block starts empty; leaving the old bytes here made
++                // a short final block absorb stale data from the block before.
++                Array.Clear(block, 0, Rate);
++                buffered = 0;
++            }
++        }
++    }
++
++    public byte[] Finish()
++    {
++        block[buffered] ^= 0x06;
++        block[Rate - 1] ^= 0x80;
++        Absorb(block);
++        Permute();
++
++        var digest = new byte[32];
++        for (int i = 0; i < 4; i++)
++        {
++            ulong lane = state[i];
++            for (int b = 0; b < 8; b++)
++                digest[i * 8 + b] = (byte)(lane >> (8 * b));
++        }
++        return digest;
++    }
++
++    private void Absorb(byte[] source)
++    {
++        for (int i = 0; i < Rate; i++)
++            state[i / 8] ^= (ulong)source[i] << (8 * (i % 8));
++    }
++
++    private static ulong Rotl(ulong value, int shift) =>
++        shift == 0 ? value : (value << shift) | (value >> (64 - shift));
++
++    private void Permute()
++    {
++        var c = new ulong[5];
++        var b = new ulong[25];
++        for (int round = 0; round < 24; round++)
++        {
++            for (int x = 0; x < 5; x++)
++                c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
++
++            for (int x = 0; x < 5; x++)
++            {
++                ulong d = c[(x + 4) % 5] ^ Rotl(c[(x + 1) % 5], 1);
++                for (int y = 0; y < 5; y++)
++                    state[x + 5 * y] ^= d;
++            }
++
++            for (int x = 0; x < 5; x++)
++            {
++                for (int y = 0; y < 5; y++)
++                {
++                    int source = x + 5 * y;
++                    int target = y + 5 * ((2 * x + 3 * y) % 5);
++                    b[target] = Rotl(state[source], Rotations[source]);
++                }
++            }
++
++            for (int x = 0; x < 5; x++)
++            {
++                for (int y = 0; y < 5; y++)
++                {
++                    int index = x + 5 * y;
++                    state[index] = b[index] ^ ((~b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]);
++                }
++            }
++
++            state[0] ^= RoundConstants[round];
++        }
++    }
++}

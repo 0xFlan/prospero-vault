@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { closeSync, existsSync, openSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
-import { shortSize, type Config } from "./core";
+import { ROOT, shortSize, type Config } from "./core";
 
 export type EngineId = "mock" | "psviethoa" | "command";
 export type Progress = { pct: number; line: string };
@@ -80,9 +80,32 @@ export async function sweepWorkbench(outDir: string): Promise<number> {
   return removed;
 }
 
+/**
+ * The packer that ships in this checkout. Real users should not have to paste a
+ * command before their first real build: when no command is configured, this is
+ * used, and the settings screen says where it came from. A configured command
+ * always wins.
+ */
+export function bundledAcpack(): string | null {
+  // The apphost next to the dll cannot find a Homebrew dotnet on macOS (no
+  // DOTNET_ROOT), so the dll is run through the dotnet that is on PATH.
+  const dll = join(ROOT, "packer", "bin", "Release", "net10.0", "acpack.dll");
+  if (!existsSync(dll) || !which("dotnet")) return null;
+  return dll;
+}
+
+export function commandTemplate(cfg: Config): string {
+  const own = cfg.enginePaths.command?.trim();
+  if (own) return own;
+  const dll = bundledAcpack();
+  const dotnet = which("dotnet");
+  return dll && dotnet ? `"${dotnet}" "${dll}" build --source "{source}" --output "{output}"` : "";
+}
+
 export function probeEngines(cfg: Config): EngineStatus[] {
   const psviethoaPath = cfg.enginePaths.psviethoa || which(PSVIETHOA_BIN);
-  const command = cfg.enginePaths.command?.trim();
+  const command = commandTemplate(cfg);
+  const ownCommand = cfg.enginePaths.command?.trim();
 
   return [
     {
@@ -99,7 +122,9 @@ export function probeEngines(cfg: Config): EngineStatus[] {
       name: "Custom command",
       available: Boolean(command),
       detail: command
-        ? "Configured. Placeholders: {source} {titleId} {output} {pkg}"
+        ? ownCommand
+          ? "Configured. Placeholders: {source} {titleId} {output} {pkg}"
+          : `Using the bundled packer at ${bundledAcpack()} (run with dotnet)`
         : "No command configured. Use this for orbis-pub-cmd, LibProsperoPkg or your own packer.",
       simulated: false,
     },
@@ -357,7 +382,7 @@ async function runEngine(
     return { path: pkgPath, simulated: false, log: tail.slice(-40) };
   }
 
-  const template = cfg.enginePaths.command?.trim();
+  const template = commandTemplate(cfg);
   if (!template) throw new Error("No custom command configured");
 
   const pkgPath = join(work.outDir, `${work.titleId}.pkg`);

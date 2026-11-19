@@ -99,9 +99,17 @@ the library refuses to write a package rather than emit a wrong one:
 SHA3-256 is required for PS5 PFS key derivation and digests but is not available on this platform/runtime.
 ```
 
-`acpack inspect` works on macOS (it never hashes). `acpack build` must run on
-Linux or Windows, where SHA3 is available. With a Lima VM this is the flow that
-produced the package above:
+macOS .NET has **no** SHA-3 (it delegates to the OS, and Apple provides none),
+while every PS5 package path needs SHA3-256. `packer/patches/0001-managed-sha3.patch`
+teaches LibProsperoPkg a managed Keccak sponge, so `build` works on a Mac:
+
+```bash
+./packer/build.sh   # applies the patch once, then builds acpack.dll
+```
+
+The managed digest is checked against Python's `hashlib.sha3_256` for empty,
+boundary (135/136/137-byte), 1 KB and 1 MB inputs. On a machine without dotnet,
+the Lima flow below still works:
 
 ```bash
 # once: SDK inside the VM
@@ -119,23 +127,25 @@ the source tree in and the `.pkg` out.
 
 ## Wiring it into Prospero Vault
 
-No app change is needed: it runs through the existing custom-command engine, and
-the console still pulls the source and pulls the package back.
-
-In Prospero Vault → Settings → *Custom command*:
+Nothing to configure: with `engine: auto` and no custom command, Prospero Vault
+finds `packer/bin/Release/net10.0/acpack.dll`, runs it with the `dotnet` on PATH,
+and labels the engine **Custom command — bundled packer**. A command you set in
+Settings always wins:
 
 ```
-acpack build --source "{source}" --output "{output}"
+dotnet /path/to/acpack.dll build --source "{source}" --output "{output}"
 ```
 
-On a macOS-only setup that command has to be a wrapper that runs the build in a
-host with SHA3 (see above), or the Mac helper itself should run on Linux.
+The console still pulls the source and pulls the package back.
 
 ## Status
 
 Verified November 2026 with .NET 10.0.404 and LibProsperoPkg `748eabf`:
 
 - **Compiles** — `dotnet build` → 0 errors, on macOS and on Ubuntu 24.04.
+- **Builds on macOS** — with the managed-SHA3 patch, a folder with `param.json`
+  and an `eboot.bin` produces a validated `.pkg` (`7F 46 49 48` magic), not a
+  platform error.
 - **`inspect` verified** on real folder shapes: an `ac` DLC tree is reported
   `kind: ac`, mode `ac`, with title and content id read from `param.json`; a
   `gd` game tree as `kind: app`. Incomplete trees report `missing` and exit 1.

@@ -327,6 +327,11 @@ async function runBuild(game: Game): Promise<void> {
     broadcast({ type: "log", titleId: game.titleId, line: game.note });
   }
 
+  // The outcome is decided. Release the queue marker before the state is
+  // persisted and broadcast: a client that reacts to "built" used to be told
+  // the build was still queued until this function returned.
+  pendingBuilds.delete(game.titleId);
+
   // The library write is part of the build. A full or read-only data folder
   // used to leave the app saying "packaged" with nothing on disk and only a
   // console line to show for it.
@@ -798,6 +803,10 @@ async function handle(req: Request, url: URL): Promise<Response> {
       game.consoleLabel = result.label;
       game.note = result.detail;
       touch(game);
+      // Release the console before the terminal state is broadcast: a client
+      // that sees "installed" and sends the next title used to be told the
+      // finished job was still receiving, until this request's finally ran.
+      deploying = null;
       await persist();
       broadcast({ type: "state", games });
 

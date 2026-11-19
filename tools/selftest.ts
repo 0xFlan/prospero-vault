@@ -234,7 +234,10 @@ async function main(): Promise<void> {
   // the deploy step depend on hardware being plugged in.
   await writeFile(
     CONFIG_PATH,
-    JSON.stringify({ port: PORT, consoleHost: null, engine: "auto", enginePaths: {}, scanDirs: [] }),
+    // The suite's builds are synthetic: the deterministic fake engine is the
+    // subject here. Auto-resolution with the bundled packer is checked by the
+    // realpack app later in this file.
+    JSON.stringify({ port: PORT, consoleHost: null, engine: "mock", enginePaths: {}, scanDirs: [] }),
   );
 
   server = startServer();
@@ -245,10 +248,19 @@ async function main(): Promise<void> {
 
     const initial = await getState();
     check("library loads", Array.isArray(initial.games));
+    // Behaviour changed on purpose: this checkout ships acpack, but this suite
+    // deliberately runs the fake so its synthetic fixtures are reproducible.
+    // The bundled packer must still be advertised, and the realpack app below
+    // proves auto-resolution picks it.
     check(
-      "engine resolves without any packer installed",
-      initial.engine === "mock",
+      "the suite runs the deterministic engine it asked for",
+      initial.engine === "mock" && initial.engines.some((engine: any) => engine.id === "mock" && engine.available),
       `engine=${initial.engine}`,
+    );
+    check(
+      "the bundled packer is offered without any setup",
+      initial.engines.some((engine: any) => engine.id === "command" && engine.available && /bundled/i.test(engine.detail)),
+      initial.engines.map((engine: any) => `${engine.id}:${engine.available}`).join(" "),
     );
 
     // ---------------- the HTTP contract ----------------
@@ -1977,34 +1989,42 @@ async function main(): Promise<void> {
     // build, so this keeps the run inside its five-minute budget.
     const cycles = 60;
     let terminalCycles = 0;
+    const cycleFailures: string[] = [];
     const soakStart = Date.now();
     for (let cycle = 0; cycle < cycles; cycle++) {
       const id = `PSOAK${String(cycle).padStart(5, "0")}`;
       await soakPost("/api/import", { items: [{ titleId: id, title: `Soak ${cycle}`, path: FIXTURE, kind: "Game folder", size: 0 }] });
       await soakPost("/api/build", { titleId: id });
       let game: any = null;
-      for (let i = 0; i < 100; i++) {
+      for (let i = 0; i < 150; i++) {
         game = await soakGame(id);
         if (game && game.state !== "building") break;
         await Bun.sleep(40);
       }
       const builtOk = game?.state === "built";
+      if (!builtOk) cycleFailures.push(`${cycle}:build=${game?.state}`);
       if (builtOk) {
-        await soakPost("/api/deploy", { titleId: id });
-        for (let i = 0; i < 100; i++) {
+        const deployAnswer = await soakPost("/api/deploy", { titleId: id });
+        if (!deployAnswer.ok) {
+          const why = await deployAnswer.text();
+          cycleFailures.push(`${cycle}:deploy=${deployAnswer.status}:${why.slice(0, 70)}`);
+        }
+        for (let i = 0; i < 150; i++) {
           game = await soakGame(id);
           if (game && game.state !== "installing") break;
           await Bun.sleep(40);
         }
       }
       const installedOk = game?.state === "installed";
+      if (builtOk && !installedOk) cycleFailures.push(`${cycle}:install=${game?.state}`);
       await fetch(`${soakHost}/api/game/${id}`, { method: "DELETE" });
       let gone = false;
-      for (let i = 0; i < 100; i++) {
+      for (let i = 0; i < 150; i++) {
         gone = !(await soakGame(id));
         if (gone) break;
         await Bun.sleep(40);
       }
+      if (!gone) cycleFailures.push(`${cycle}:delete`);
       if (builtOk && installedOk && gone) terminalCycles++;
     }
     const soakMs = Date.now() - soakStart;
@@ -2012,7 +2032,11 @@ async function main(): Promise<void> {
     const soakFd1 = fdCount();
     const soakLat1 = await latency();
     const finalState = (await (await fetch(`${soakHost}/api/state`)).json()) as any;
-    check("every soak cycle ends built, installed and then gone", terminalCycles === cycles, `${terminalCycles}/${cycles}`);
+    check(
+      "every soak cycle ends built, installed and then gone",
+      terminalCycles === cycles,
+      `${terminalCycles}/${cycles} ${cycleFailures.slice(0, 4).join(",")}`,
+    );
     check("the soak run finishes inside 120s", soakMs < 120_000, `${soakMs}ms`);
     check("RSS stays bounded through the soak", soakRss1 - soakRss0 < 80 * 1024, `${soakRss0}KB -> ${soakRss1}KB`);
     check("file descriptors do not accumulate", soakFd1 - soakFd0 < 12, `${soakFd0} -> ${soakFd1}`);
@@ -2025,6 +2049,73 @@ async function main(): Promise<void> {
     check("the soak library is empty, matching disk", Array.isArray(finalState.games) && finalState.games.length === 0, `${finalState.games?.length} left`);
   } finally {
     soak.child.kill();
+  }
+
+  /* ---------------- pass 20: a real packer with no setup ---------------- */
+  const real = await bootApp(
+    "realpack",
+    JSON.stringify({ port: 8155, consoleHost: null, engine: "auto", enginePaths: {}, scanDirs: [] }),
+    null,
+    8155,
+    {
+      beforeSpawn: async (dir) => {
+        await mkdir(join(dir, "src", "sce_sys"), { recursive: true });
+        await writeFile(
+          join(dir, "src", "sce_sys", "param.json"),
+          JSON.stringify({
+            titleId: "PPSA08888",
+            titleName: "Real Title",
+            applicationCategoryType: "gd",
+            contentId: "UP0000-PPSA08888_00-REALTEST00000001",
+            version: "01.00",
+          }),
+        );
+        await writeFile(join(dir, "src", "data.bin"), "x".repeat(2048));
+        // A real dump carries an eboot; the payload ELF is a valid stand-in for
+        // the fake-sign step. The console build runs before this suite.
+        await writeFile(
+          join(dir, "src", "eboot.bin"),
+          await readFile(join(process.cwd(), "console", "build", "prospero-vault.elf")),
+        );
+      },
+    },
+  );
+  const realHost = "http://127.0.0.1:8155";
+  try {
+    const realState = real.state as any;
+    check(
+      "a checkout with the bundled packer does not fall back to the simulated engine",
+      realState.engine !== "mock",
+      `${realState.engine}`,
+    );
+    await fetch(`${realHost}/api/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: [{ titleId: "PPSA08888", title: "Real Title", path: join(bootRoot, "realpack", "src"), kind: "Game folder", size: 0 }] }),
+    });
+    await fetch(`${realHost}/api/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ titleId: "PPSA08888" }),
+    });
+    let realGame: any = null;
+    for (let i = 0; i < 300; i++) {
+      realGame = ((await (await fetch(`${realHost}/api/state`)).json()) as any).games.find(
+        (game: any) => game.titleId === "PPSA08888",
+      );
+      if (realGame && realGame.state !== "building") break;
+      await Bun.sleep(200);
+    }
+    check("the bundled packer builds a real package without configuration", realGame?.state === "built", `${realGame?.state} ${String(realGame?.note).slice(0, 60)}`);
+    check("that build is not marked simulated", realGame?.simulated === false && realGame?.engine !== "mock", `${realGame?.simulated} ${realGame?.engine}`);
+    const realPkg = realGame?.pkgPath ? await readFile(realGame.pkgPath) : Buffer.alloc(0);
+    check(
+      "the package has a PS5 container header and real size",
+      realPkg.length > 4096 && realPkg[0] === 0x7f,
+      `${realPkg.length} bytes, first ${realPkg[0]}`,
+    );
+  } finally {
+    real.child.kill();
   }
 
   /* ---------------- pass 19: a build and an install in flight ---------------- */
