@@ -9,6 +9,10 @@ this build. The exact blocker is recorded under "Limits" rather than hidden.
 This README covers both halves: the Mac app, the console payload, and the tests
 that show what works.
 
+**Tested on:** PS5 firmware **13.20**, **ShadowMount+ 1.7beta12**, `elfldr` on
+port 9021. **Firmware 14.xx cannot run this or any other payload**: there is no
+public exploit above 13.60 as of November 2026.
+
 ## The screens
 
 These images are renders of the console interface from the Mac preview. They are
