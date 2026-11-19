@@ -2,13 +2,17 @@
 
 Prospero Vault turns a PS5 game dump into a debug FPKG and installs it with the
 console's own installer. The interface runs on the PS5, so you pick a game on the
-console and play it from the home screen. A small Mac app does the packing,
-because Sony's packers only run on a computer.
+console and play it from the home screen. A small Mac app does the packing
+today; packing on the console itself needs a native package engine and is not in
+this build. The exact blocker is recorded under "Limits" rather than hidden.
 
 This README covers both halves: the Mac app, the console payload, and the tests
 that show what works.
 
 ## The screens
+
+These images are renders of the console interface from the Mac preview. They are
+not console screenshots; the hardware run is described below.
 
 ![Library on the console](docs/screens/view-library.png)
 
@@ -48,6 +52,9 @@ list shows what each build used and whether it produced a package.
 
 - A PS5 that can load homebrew payloads, with `elfldr` on port 9021 and a file
   manager on port 8888. This guide uses `192.168.4.100` as the console address.
+  The tested machine is firmware **13.20** with **ShadowMount+ 1.7beta12** and
+  `elfldr` on 9021. Firmware 14.xx has no public exploit, so no payload can run
+  there at all.
 - A Mac on the same network. The app carries its own Bun runtime and `acpack`,
   so you do not install Bun or .NET.
 - A decrypted game dump: a folder with `eboot.bin` and `sce_sys/param.json`.
@@ -231,8 +238,9 @@ bun run test
 | `bun run check:payload` | 68 | the payload's HTTP contract, built for this Mac |
 | `bun run check:ui` | 77 | the console interface in a browser |
 
-The payload compiles for the PS5 with no warnings. Its launch, install and scan
-paths have not run on a PS5. The first hardware run is the test that matters:
+The payload compiles for the PS5 with no warnings. The console build loads on a
+**13.20** console with `elfldr` and serves the library on 8097; that hardware run
+has been done. These paths are still unproven on hardware:
 
 - install a package built here;
 - start it from this app and from the home screen;
@@ -242,6 +250,14 @@ paths have not run on a PS5. The first hardware run is the test that matters:
 
 Until those pass on a console, treat them as unproven. The build and transfer
 paths are tested against the real payload compiled for this Mac, not emulated.
+
+Two build details are load-bearing on 13.20:
+
+- the payload is PIE (`ET_DYN`); `elfldr` does not spawn the non-PIE `ET_EXEC`
+  the old Makefile produced;
+- `libSceAppInstUtil` is not linked. Mapping it into a payload process crashes
+  on 13.20, so installs are handed to the console's local installer service
+  over loopback HTTP.
 
 ## Troubleshooting
 
@@ -317,8 +333,17 @@ docs/screens/           screenshots used here
 
 ## Limits
 
-- The payload has never run on a PS5. Nothing in this repository can prove it
-  will until you load it.
+- **On-console packing is not implemented.** The packer is `LibProsperoPkg`
+  (C#/.NET, about 31,000 lines). The payload is a FreeBSD ELF with no .NET
+  runtime, so a native C++/C port of the PKG/PFS writer is required before a
+  dump can be packed without a Mac. Until that port exists, Convert runs on the
+  Mac. This is the single biggest missing feature, not a flag.
+- **Firmware 14.xx cannot run this, or any other payload.** Public exploit
+  chains stop at 13.60; 14.00/14.10 are private and 14.20+ has no public
+  jailbreak as of November 2026. No Vault change can create kernel access.
+- Install now depends on the console's local installer service on port 8888.
+  If that service is not running, Vault says so instead of pretending the
+  package was handed over.
 - The home-screen tile depends on the console's web-app shell. The path can
   differ by firmware; `"shellEboot"` in `config.json` points at another one.
 - The payload cannot change a game's frame rate or resolution.

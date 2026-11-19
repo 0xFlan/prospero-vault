@@ -24,8 +24,12 @@ Both are legitimate answers. The difference is what you pay and what you get.
 | DLC and PlayGo | Packed by `acpack` when you build | Bundled `dlc_emu` and `pgo_stub`, added automatically |
 | Saves and trophies | Untouched — the installed title uses the console's own modules | v0.3.0 stopped shadowing `libSceSaveData` after saves went missing (#64, #68) |
 | Failure reporting | Every failure carries a sentence and a name; simulated builds are labelled and refused by the console | Log lines and a title that does not appear |
-| Verification | 68 payload checks (plus ASan/UBSan), 123 self-checks, 42 pipeline checks, 57 browser checks | Build is checked in CI; behaviour is verified by hand |
 | Requirements | kstuff + elfldr, a Mac with a packer | kstuff, ShadowMount+ stopped |
+| Console firmware | Payload runs on 13.20 (tested); 14.xx has no public exploit | Same exploit ceiling applies |
+
+Both tools need a jailbroken console first. As of November 2026 public chains
+stop at **13.60**; 14.00/14.10 are private and 14.20+ has no public jailbreak. No
+application-level change can lift that ceiling.
 
 ## Where Kraken Mount is ahead, honestly
 
@@ -56,12 +60,14 @@ Both are legitimate answers. The difference is what you pay and what you get.
 
 ## What we are closing next
 
-1. **Zero-config discovery on the Mac** — offer `~/Downloads`, `~/Desktop` and
+1. **Packing on the console itself** — this is the big one. The current packer
+   is C#/.NET and cannot run in a FreeBSD payload; the enabling work is a native
+   port of the PKG/PFS writer, not a setting. Until that exists, Convert needs
+   the Mac.
+2. **Zero-config discovery on the Mac** — offer `~/Downloads`, `~/Desktop` and
    mounted volumes as one-tap scan roots, so the first run asks for less.
-2. **Compressed folder dumps** (zstd, LZ4) on the pull path, so a packed dump on
+3. **Compressed folder dumps** (zstd, LZ4) on the pull path, so a packed dump on
    the console can be pulled and repacked instead of refused.
-3. **Send and launch in one press** — the console already installs then starts a
-   package from one tap; the desktop app should hand off with the same intent.
 
 Mounting without installing stays out of scope on purpose: it is a different
 product with a different trade-off, and doing both badly would be worse than

@@ -23,12 +23,13 @@ ifneq ($(HAVE_SDK),)
 include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 endif
 
-CXXFLAGS += -std=c++17 -O2 -Wall -Wextra -Wl,--no-pie -DPV_BUILD_ID=\"$(BUILD_ID)\" -DPV_HAVE_SONY=1
+CXXFLAGS += -std=c++17 -O2 -Wall -Wextra -DPV_BUILD_ID=\"$(BUILD_ID)\" -DPV_HAVE_SONY=1
 
-# Sony's own launcher and installer entry points. The SDK ships them as link
-# stubs; the console binds them at load time. Without these the payload can
-# list titles but never start one.
-LDLIBS += -lSceSystemService -lSceUserService -lSceAppInstUtil
+# Sony's launcher and user-service entry points. The SDK ships them as link
+# stubs; the console binds them at load time. libSceAppInstUtil is deliberately
+# not here: the 13.20 loader crashes mapping it into a payload process, so
+# installs are handed to the local installer service over HTTP.
+LDLIBS += -lSceSystemService -lSceUserService
 
 ELF      := $(BUILD_DIR)/prospero-vault.elf
 UI_CPP   := $(BUILD_DIR)/ui_data.cpp

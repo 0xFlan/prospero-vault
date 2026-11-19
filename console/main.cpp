@@ -80,12 +80,10 @@ int sceSystemServiceLaunchApp(const char* title_id, const char* argv, void* para
 int sceUserServiceInitialize(void* param);
 int sceUserServiceGetForegroundUser(int* user_id);
 
-// The console's own installer. sceAppInstUtilAppInstallPkg returns as soon as
-// the package is accepted and finishes on Sony's install service, so progress
-// is read back with sceAppInstUtilAppExists rather than guessed.
-int sceAppInstUtilInitialize(void);
-int sceAppInstUtilAppInstallPkg(const char* pkg_path, void* reserved);
-int sceAppInstUtilAppExists(const char* title_id, int* exists);
+// libSceAppInstUtil is deliberately not linked. On firmware 13.20 the loader
+// crashes while mapping it into a payload process, so every Vault load died
+// before the server came up. Installation is handed to the console's local
+// installer service over HTTP instead; see install_package().
 }
 #endif
 
@@ -624,12 +622,19 @@ bool sfo_read(const char* path, char* title, std::size_t title_cap, char* id, st
  */
 bool title_installed(const char* id) {
 #if PV_HAVE_SONY
-  int exists = 0;
-  if (id && id[0] && sceAppInstUtilAppExists(id, &exists) == 0) return exists != 0;
+  if (!id || !id[0]) return false;
+  // The shell creates this directory only after an install is complete, so it
+  // is the same answer AppInstUtil gave without loading that library.
+  char path[256];
+  std::snprintf(path, sizeof path, "%s/%s", PV_APP_ROOT, id);
+  struct stat info;
+  if (::stat(path, &info) == 0 && S_ISDIR(info.st_mode)) return true;
+  std::snprintf(path, sizeof path, "/user/appmeta/%s", id);
+  return ::stat(path, &info) == 0;
 #else
   (void)id;
-#endif
   return false;
+#endif
 }
 
 void add_title(const char* id, const char* name, const char* path, const char* kind, const char* platform,
@@ -1181,6 +1186,23 @@ int json_int(const char* body, const char* key, int fallback) {
   return std::atoi(at + 1);
 }
 
+void url_encode(char* out, std::size_t cap, const char* text) {
+  static const char* hex = "0123456789ABCDEF";
+  std::size_t n = 0;
+  for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p && n + 4 < cap; p++) {
+    const unsigned char c = *p;
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '~') {
+      out[n++] = static_cast<char>(c);
+    } else {
+      out[n++] = '%';
+      out[n++] = hex[c >> 4];
+      out[n++] = hex[c & 0x0F];
+    }
+  }
+  out[n] = '\0';
+}
+
 void jescape(char* out, std::size_t cap, const char* text) {
   std::size_t n = 0;
   for (const char* p = text; *p && n + 2 < cap; p++) {
@@ -1276,8 +1298,9 @@ int connect_to(const char* host, const char* port) {
   return fd;
 }
 
-/** Plain HTTP call. Returns the status code, or a negative value on failure. */
-int http_call(const char* method, const char* url, const char* body, char* response, std::size_t cap) {
+/** Plain HTTP call with an explicit content type. Returns the status code, or a negative value on failure. */
+int http_call_ex(const char* method, const char* url, const char* body, const char* content_type,
+                 char* response, std::size_t cap) {
   Target target;
   if (!parse_http_url(url, &target)) return -1;
 
@@ -1289,9 +1312,10 @@ int http_call(const char* method, const char* url, const char* body, char* respo
   const int length = body
       ? std::snprintf(request, sizeof request,
                       "%s %s HTTP/1.0\r\nHost: %s:%s\r\nUser-Agent: prospero-vault/%s\r\n"
-                      "Content-Type: application/json\r\nContent-Length: %zu\r\n"
+                      "Content-Type: %s\r\nContent-Length: %zu\r\n"
                       "Connection: close\r\n\r\n%s",
-                      method, target.path, target.host, target.port, kVersion, std::strlen(body), body)
+                      method, target.path, target.host, target.port, kVersion, content_type,
+                      std::strlen(body), body)
       : std::snprintf(request, sizeof request,
                       "%s %s HTTP/1.0\r\nHost: %s:%s\r\nUser-Agent: prospero-vault/%s\r\n"
                       "Connection: close\r\n\r\n",
@@ -1355,6 +1379,11 @@ int http_call(const char* method, const char* url, const char* body, char* respo
     std::snprintf(response, cap, "%s", marker ? marker + 4 : "");
   }
   return status;
+}
+
+/** JSON is the default; form posts go through the explicit variant above. */
+int http_call(const char* method, const char* url, const char* body, char* response, std::size_t cap) {
+  return http_call_ex(method, url, body, "application/json", response, cap);
 }
 
 /**
@@ -2202,16 +2231,6 @@ int remove_home_app(char* message, std::size_t cap) {
 #endif
 }
 
-#if PV_HAVE_SONY
-/** At boot the tile is usually already in place; this repairs it when it is not. */
-void* home_app_thread(void*) {
-  char message[320] = {0};
-  const int result = ensure_home_app(false, message, sizeof message);
-  log_fmt("home app: %d — %s", result, message);
-  return nullptr;
-}
-#endif
-
 /**
  * Starts a title. Packages ask the mount payload for the fake-library policy a
  * debug FPKG needs; images ask it to mount. Then Sony's own launcher runs the
@@ -2365,13 +2384,14 @@ void* play_watchdog(void*) {
 /* ---------------------------------------------------------------- */
 
 /**
- * Installs a local .pkg with the console's own installer, then optionally
- * starts it.
+ * Installs a local .pkg through the console's local installer service, then
+ * optionally starts it.
  *
- * There is deliberately no third-party mount payload in this path: Sony's
- * installer is what the console itself uses, it runs on its own service, and
- * sceAppInstUtilAppExists is the only answer that actually means "playable".
- * A bar that creeps is honest; a bar that lies is worse than none.
+ * The service is the same one the web file manager drives. It is asked over
+ * loopback with a form body, because libSceAppInstUtil cannot be mapped into
+ * this process on 13.20. An install is accepted asynchronously; completion is
+ * read from /user/app rather than guessed, and a missing service is reported
+ * as such instead of pretending the package was handed over.
  */
 bool install_package(const char* id, bool launch_after, char* message, std::size_t cap) {
 #if PV_HAVE_SONY
@@ -2389,12 +2409,26 @@ bool install_package(const char* id, bool launch_after, char* message, std::size
   if (!title_installed(id)) {
     job_set("handing the package to this console", 12);
     log_fmt("install: %s -> %s", id, path);
-    const int rc = sceAppInstUtilAppInstallPkg(path, nullptr);
-    if (rc != 0) {
+
+    char encoded[640];
+    url_encode(encoded, sizeof encoded, path);
+    char form[768];
+    std::snprintf(form, sizeof form, "paths=%s", encoded);
+    char answer[512] = {0};
+    const int status = http_call_ex("POST", "http://127.0.0.1:8888/api/install-pkg", form,
+                                    "application/x-www-form-urlencoded", answer, sizeof answer);
+    if (status < 0) {
       std::snprintf(message, cap,
-                    "The console refused to install %s (0x%08x). A package built for another firmware, or "
-                    "one that is not a debug package, is turned down this way.",
-                    id, static_cast<unsigned>(rc));
+                    "No local installer service is answering on port 8888, so %s cannot be handed to "
+                    "the console. Start the console's file manager payload, then press Install again.",
+                    id);
+      return false;
+    }
+    if (status != 200 || std::strstr(answer, "\"ok\":true") == nullptr) {
+      std::snprintf(message, cap,
+                    "The local installer service refused %s (HTTP %d). The file manager's log has the "
+                    "reason; a package built for another firmware is turned down this way.",
+                    id, status);
       return false;
     }
 
@@ -3636,13 +3670,6 @@ int main() {
   log_fmt("%s %s build %s", kName, kVersion, PV_BUILD_ID);
   load_config();
 
-#if PV_HAVE_SONY
-  // Up before the first scan, because the scan asks whether each package is
-  // already installed.
-  const int inst_rc = sceAppInstUtilInitialize();
-  if (inst_rc != 0) log_fmt("AppInstUtil initialize: 0x%08x", static_cast<unsigned>(inst_rc));
-#endif
-
   // Serve first, scan second: on a console with USB drives the walk takes
   // seconds, and a blank page for that long looks broken.
   pthread_mutex_lock(&g_lock);
@@ -3690,14 +3717,10 @@ int main() {
 
   log_fmt("listening on 0.0.0.0:%d, scanning for titles", g_port);
 
-  // A tile in the app row, so this app is opened like any other on the console
-  // instead of through a browser bookmark. Off the main path: it copies a shell
-  // eboot the first time and is a stat() afterwards.
-#if PV_HAVE_SONY
-  pthread_t home_app;
-  if (::pthread_create(&home_app, nullptr, home_app_thread, nullptr) == 0) ::pthread_detach(home_app);
-#endif
-
+  // The home-screen tile is written only when someone asks for it. Doing it
+  // here at boot made the payload die a second after it started on 13.20: the
+  // shell copy and the mount-payload probe are not safe in a background thread
+  // that early. The button in Console calls the same code with a live request.
   pthread_t scanner;
   if (::pthread_create(&scanner, nullptr, scan_thread, nullptr) == 0) {
     ::pthread_detach(scanner);
