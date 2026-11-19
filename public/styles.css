@@ -28,14 +28,16 @@
   --font: "Sony SST", "SST", "SST Light", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
 
-/* SST wiring — real SST resolves via local(); drop licensed web fonts at
-   /fonts/ to use it in-browser. SST is proprietary and not bundled. */
+/* SST wiring — real SST resolves via local(). SST is proprietary and not
+   bundled, and pointing at /fonts/ files that do not ship made every page load
+   log two 404s, so the fallback stack does the work until a person installs
+   the font on their own machine. */
 @font-face { font-family: "SST"; font-weight: 300; font-display: swap;
-  src: local("Sony SST Light"), local("SST Light"), url("/fonts/SST-Light.woff2") format("woff2"); }
+  src: local("Sony SST Light"), local("SST Light"); }
 @font-face { font-family: "SST"; font-weight: 400; font-display: swap;
-  src: local("Sony SST"), local("SST Roman"), local("SST"), url("/fonts/SST-Roman.woff2") format("woff2"); }
+  src: local("Sony SST"), local("SST Roman"), local("SST"); }
 @font-face { font-family: "SST"; font-weight: 500; font-display: swap;
-  src: local("Sony SST Medium"), local("SST Medium"), url("/fonts/SST-Medium.woff2") format("woff2"); }
+  src: local("Sony SST Medium"), local("SST Medium"); }
 
 * { box-sizing: border-box; }
 
