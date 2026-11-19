@@ -1,7 +1,7 @@
 # Prospero Vault
 
 Prospero Vault is a native PS5 title. It launches from the home row, draws its
-interface with VideoOut/GPU presentation, and reads the DualSense directly. A
+interface into VideoOut's tiled framebuffer, and reads the DualSense directly. A
 payload loaded with `elfldr` is the title's backend: it scans the library, hands
 installs to the console, converts through the Mac, and starts titles. The Mac
 app still builds the packages; packing on the console itself needs a native
@@ -75,7 +75,7 @@ downloads it. A finished package plays with one press; a new one installs first.
 ![Console](docs/screens/view-console.png)
 
 **Console.** Mac address, storage, payload version, games folder and rescan. The
-Home screen app row installs or removes the console icon for this interface.
+Web tile fallback row writes the shell icon only when the native title is absent.
 
 ![Settings](docs/screens/view-settings.png)
 
