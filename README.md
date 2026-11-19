@@ -3,10 +3,10 @@
 Prospero Vault is a native PS5 title. It launches from the home row, draws its
 interface into VideoOut's tiled framebuffer, and reads the DualSense directly. A
 payload loaded with `elfldr` is the title's backend: it scans the library, hands
-installs to the console, converts through the Mac, and starts titles. The Mac
-app still builds the packages; packing on the console itself needs a native
-package engine and is not in this build. The exact blocker is recorded under
-"Limits" rather than hidden.
+installs to the console, packs on the Mac or through a loaded on-console engine,
+and starts titles. The engine is a separate GPL payload today; without it, the
+Mac is still the packer. The install ceiling is recorded under "Limits" rather
+than hidden.
 
 The native title lives in `console-native/`. The payload and the browser page it
 serves remain as the backend API and as the fallback interface. This README
@@ -49,6 +49,15 @@ The native title was launched on the tested **13.20** console. Its frame counter
 advanced while it read 21 titles from the backend. The screen itself and the
 controller buttons were not captured or visually checked in that run; treat the
 look and the button mapping as needing your eyes on the console.
+
+Packing can stay on the console too. With PS5 Dump Forge 0.5.6 loaded on 8095,
+a dump's pack sheet offers **Pack on this console**; Vault starts the job and
+reports its progress. On this console a 110-file, 85,341,147-byte dump became a
+**39,008,291-byte FPKG**, and the engine verified all 85,341,147 source bytes.
+Installing that package on 13.20 still fails with `0x80BD0005`. On firmware where
+kstuff/ppr-patch supports FPKG install (≤11.60) the same package is the
+candidate, though that install has not been tested here. See
+`docs/on-console-packing.md` for the evidence and the firmware table.
 
 ## The screens (browser fallback)
 
@@ -284,9 +293,13 @@ The payload compiles for the PS5 with no warnings. The console build loads on a
 **13.20** console with `elfldr` and serves the library on 8097; that hardware run
 has been done. The native title was staged with `dist/install.elf`, launched by
 LNC as `PVLT00001`, and answered on 8096 with an increasing frame count and 21
-titles. These paths are still unproven on hardware:
+titles. On-console packing was checked on the same console: a
+110-file, 85,341,147-byte dump produced a 39,008,291-byte FPKG, with every source
+byte verified. Installing that package on 13.20 still fails with `0x80BD0005`,
+through both Vault's installer and the engine's installer. These paths are still
+unproven on hardware:
 
-- install a package built here;
+- install a package built here and play it;
 - start it from this app and from the home screen;
 - open a DLC package;
 - mount an `.exfat` dump;
@@ -380,20 +393,22 @@ docs/screens/           screenshots used here
 
 ## Limits
 
-- **On-console packing is not implemented.** The packer is `LibProsperoPkg`
-  (C#/.NET, about 31,000 lines). The payload is a FreeBSD ELF with no .NET
-  runtime, so a native C++/C port of the PKG/PFS writer is required before a
-  dump can be packed without a Mac. Until that port exists, Convert runs on the
-  Mac. This is the single biggest missing feature, not a flag.
+- **On-console packing needs a second payload.** Vault drives PS5 Dump Forge
+  0.5.6 on port 8095; it does not embed a PKG writer. The engine is GPL-3.0 and
+  is not vendored. Without it loaded, Convert runs on the Mac. Moving the engine
+  into Vault (a native writer or a linked static library) is the next step, not
+  a setting.
 - **Firmware 14.xx cannot run this, or any other payload.** Public exploit
   chains stop at 13.60; 14.00/14.10 are private and 14.20+ has no public
   jailbreak as of November 2026. No Vault change can create kernel access.
 - Install now depends on the console's local installer service on port 8888,
-  and on kstuff actually supporting FPKG installs. On 13.20 it does not: the
-  service returns `0x80BD0005` after accepting the request. If the service is
-  missing, Vault says so instead of pretending the package was handed over.
-- An on-console packer would not make this console play the result: FPKG install
-  itself is the ceiling on 13.20. Mounting is the supported path there.
+  and on kstuff/ppr-patch actually supporting FPKG installs. On 13.20 they do
+  not: the service returns `0x80BD0005` after accepting the request, including
+  for a package built on the console. If the service is missing, Vault says so
+  instead of pretending the package was handed over.
+- On-console packing does not lift that ceiling: the package is built and
+  verified, then the installer refuses it. Mounting is the supported path on
+  13.20.
 - **The native title is a development FSELF, not a retail PKG.** It is built
   with the public native-app toolchain (`tooling/native`, `ps5-pie.ld`, an
   FSELF writer) and the generated clean-room `libc.prx`. It was verified on
@@ -404,7 +419,11 @@ docs/screens/           screenshots used here
 - The shell web tile remains as a fallback, but the payload now refuses to
   overwrite a native eboot or delete the native folder. `POST /api/home-app` on
   a native install returns the "left alone" message; `remove` refuses too.
-- The payload cannot change a game's frame rate or resolution.
-- Patches (`gp`), firmware images and retail packages are not supported.
+- The payload cannot change a game's frame rate or resolution. A launched game
+  is a normal console title and gets the console's hardware; Vault does not wrap
+  it or draw over it.
+- Vault does not discover or install update (`gp`) content yet. The on-console
+  engine can pack it; install remains blocked on 13.20. Firmware images and
+  retail packages are not supported.
 - Signing and notarization need your Developer ID. The app check covers the
   ad-hoc build on this Mac.

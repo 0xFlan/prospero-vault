@@ -935,6 +935,14 @@
             action: "settings",
           }),
           row({
+            key: "console:packer",
+            title: "On-console packer",
+            desc: "Dump Forge on 8095 packs a dump without a Mac",
+            value: "Status",
+            glyph: '<svg viewBox="0 0 24 24"><path d="M4.5 7.2l7.5-3.8 7.5 3.8v9.6L12 20.6l-7.5-3.8z"/><path d="M4.5 7.2l7.5 3.8 7.5-3.8M12 11v9.6"/></svg>',
+            action: "packerInfo",
+          }),
+          row({
             key: "console:home-app",
             title: "Web tile fallback",
             desc:
@@ -1010,7 +1018,7 @@
           '<div class="section">Package building</div><div class="rows">' + rows[0] + "</div>" +
           '<div class="section">Library</div><div class="rows">' + rows[1] + "</div>" +
           '<div class="section">About</div><div class="rows">' + rows[2] + "</div>" +
-          '<div class="note">Packing runs on the Mac, because no FPKG packer runs on the console. The console asks it to build, then pulls the finished package into /data/prospero-vault/Games.</div>'
+          '<div class="note">Packing runs on the Mac by default. With Dump Forge loaded on the console, a dump can also be packed there; the result installs only where kstuff and ppr-patch support debug packages.</div>'
         );
       }
 
@@ -1104,15 +1112,21 @@
 
         S.pending = id;
         openSheet(
-          "<h2>Convert to FPKG?</h2>" +
-            '<div class="note">' + esc(game.name) + " will be packed " +
-            (S.mac ? "on " + esc(S.mac) : "on your Mac (set its address in Settings)") +
-            " and pulled onto this console.</div>" +
+          "<h2>Pack " + esc(game.name) + "?</h2>" +
+            '<div class="note">No Mac is needed for the console path. It uses the Dump Forge engine on ' +
+            "port 8095; the package installs only where kstuff and ppr-patch support debug packages." +
+            "</div>" +
             '<div class="actions">' +
-            row({ key: "confirm:yes", title: "Yes", action: "confirmYes" }) +
-            row({ key: "confirm:no", title: "No", action: "close" }) +
+            row({ key: "confirm:console", title: "Pack on this console", desc: "Dump Forge engine, no Mac", action: "packConsole", id: id }) +
+            row({
+              key: "confirm:yes",
+              title: "Pack on the Mac",
+              desc: S.mac ? "Build at " + S.mac : "Set the Mac address in Settings",
+              action: "confirmYes",
+            }) +
+            row({ key: "confirm:no", title: "Cancel", action: "close" }) +
             "</div>",
-          '[data-key="confirm:yes"]',
+          '[data-key="confirm:console"]',
         );
       }
 
@@ -1138,11 +1152,12 @@
 
       function jobTitle(job) {
         var installing = job.kind === "install";
+        var packing = job.kind === "pack";
         if (job.done) {
-          if (!job.ok) return installing ? "Install stopped" : "Conversion stopped";
+          if (!job.ok) return installing ? "Install stopped" : packing ? "Pack stopped" : "Conversion stopped";
           return installing ? "Ready to play" : "Package ready";
         }
-        return installing ? "Installing" : "Converting";
+        return installing ? "Installing" : packing ? "Packing on the console" : "Converting";
       }
 
       function jobCard(job) {
@@ -1361,6 +1376,80 @@
           });
       }
 
+      function packConsole(id) {
+        api("POST", "/api/console-pack", { id: id })
+          .then(function (data) {
+            S.job = {
+              active: true, done: false, ok: false, kind: "pack", id: id, pct: 1,
+              line: "starting", message: (data && data.message) || "Packing on the console…",
+            };
+            closeSheet();
+            trackPack();
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
+      function trackPack() {
+        if (jobTimer) clearInterval(jobTimer);
+        showJob();
+        jobTimer = setInterval(function () {
+          api("GET", "/api/console-pack/status")
+            .then(function (job) {
+              job.kind = "pack";
+              S.job = job;
+              paintJob(job);
+              // A restarted payload forgets the job; do not poll a ghost forever.
+              if (!job.active && !job.done) {
+                clearInterval(jobTimer);
+                jobTimer = null;
+                closeSheet();
+                toast(job.message || "The console pack stopped.", true);
+                return;
+              }
+              if (job.done) {
+                clearInterval(jobTimer);
+                jobTimer = null;
+                showJob();
+                if (job.ok) {
+                  setTimeout(function () {
+                    if (S.sheet) closeSheet();
+                    load();
+                  }, 1800);
+                } else {
+                  load();
+                }
+              }
+            })
+            .catch(function () {
+              clearInterval(jobTimer);
+              jobTimer = null;
+              closeSheet();
+              toast("Lost contact with the payload", true);
+            });
+        }, 700);
+      }
+
+      function packerInfo() {
+        api("GET", "/api/console-pack")
+          .then(function (data) {
+            openSheet(
+              "<h2>On-console packer</h2>" +
+                '<div class="note">' + esc(data.message || "No engine answered.") +
+                (data.available && data.version ? " Version " + esc(data.version) + "." : "") +
+                "</div>" +
+                '<div class="actions">' +
+                row({ key: "packer:close", title: "OK", action: "close" }) +
+                "</div>",
+              '[data-key="packer:close"]',
+            );
+          })
+          .catch(function (error) {
+            toast(error.message, true);
+          });
+      }
+
       function play(id) {
         api("POST", "/api/play", { id: id })
           .then(function (data) {
@@ -1528,6 +1617,7 @@
           var id = action.getAttribute("data-id");
           if (name === "convert") convert(id);
           else if (name === "confirmYes") convert(S.pending);
+          else if (name === "packConsole") packConsole(id);
           else if (name === "play") play(action.getAttribute("data-id"));
           else if (name === "close") closeSheet();
           else if (name === "cancel") cancelJob();
@@ -1535,6 +1625,7 @@
           else if (name === "rescan") rescan();
           else if (name === "homeApp") homeAppMenu();
           else if (name === "homeAppRemove") removeHomeApp();
+          else if (name === "packerInfo") packerInfo();
           else if (name === "editMac") settingsMacSheet();
           else if (name === "saveMac") saveMac();
           else if (name === "settings") {

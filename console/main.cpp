@@ -208,10 +208,30 @@ struct Job {
 
 Job g_job = {false, false, false, 0, {0}, {0}, {0}, {0}};
 
+/**
+ * One on-console pack at a time. The engine is a separate payload (Dump Forge
+ * on 8095); this is only the job Vault asked it to run and the file it will
+ * produce. Progress is read from the size of the engine's .part file, so the
+ * UI does not depend on the engine's internal JSON shape.
+ */
+struct PackJob {
+  bool active;
+  bool done;
+  bool ok;
+  int engine_job;
+  char id[16];
+  char output[512];
+  long long source_size;
+  long long started_ms;
+  char message[320];
+};
+
+PackJob g_pack = {false, false, false, 0, {0}, {0}, 0, 0, {0}};
+
 /** Set by /api/convert/cancel; the worker checks it between steps. */
 bool g_cancel = false;
 
-/** Guards g_titles, g_count, g_job, g_cancel and g_mac. */
+/** Guards g_titles, g_count, g_job, g_pack, g_cancel and g_mac. */
 pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /** Serialises scans, which share g_scan. */
@@ -254,6 +274,8 @@ int g_port = kPort;
 void games_json(char* out, std::size_t cap);
 void rebuild_json_locked();
 int find_title_locked(const char* id);
+long long folder_bytes(const char* path, int depth);
+bool dump_source_locked(const char* id, char* out, std::size_t cap, long long* size);
 bool json_string(const char* body, const char* key, char* out, std::size_t cap);
 bool title_installed(const char* id);
 bool mount_payload_ready(bool force);
@@ -1419,6 +1441,200 @@ int http_call_ex(const char* method, const char* url, const char* body, const ch
 /** JSON is the default; form posts go through the explicit variant above. */
 int http_call(const char* method, const char* url, const char* body, char* response, std::size_t cap) {
   return http_call_ex(method, url, body, "application/json", response, cap);
+}
+
+/* ---------------------------------------------------------------- */
+/* packing on the console                                           */
+/* ---------------------------------------------------------------- */
+
+/** The on-console engine is a separate payload; 8095 is its fixed port. */
+constexpr const char* kPackSession = "http://127.0.0.1:8095/api/session";
+constexpr const char* kPackStart = "http://127.0.0.1:8095/api/start_job";
+
+bool pack_engine(char* version, std::size_t cap) {
+  if (version && cap) version[0] = '\0';
+  char body[1024] = {0};
+  if (http_call("GET", kPackSession, nullptr, body, sizeof body) != 200) return false;
+  if (version && cap) json_string(body, "version", version, cap);
+  return true;
+}
+
+/** Chooses a package name that is not on disk; the engine refuses an existing output. */
+bool pack_output_path(const char* id, char* out, std::size_t cap) {
+  for (int n = 1; n <= 99; n++) {
+    if (n == 1) {
+      std::snprintf(out, cap, "%s/%s-console.pkg", kGames, id);
+    } else {
+      std::snprintf(out, cap, "%s/%s-console-%d.pkg", kGames, id, n);
+    }
+    if (::access(out, F_OK) != 0) return true;
+  }
+  return false;
+}
+
+bool pack_start(const char* id, char* message, std::size_t cap) {
+  char source[512] = {0};
+  char kind[12] = {0};
+  long long source_size = 0;
+
+  pthread_mutex_lock(&g_lock);
+  const int index = find_title_locked(id);
+  if (index >= 0) {
+    std::snprintf(source, sizeof source, "%s", g_titles[index].path);
+    std::snprintf(kind, sizeof kind, "%s", g_titles[index].kind);
+    source_size = g_titles[index].size;
+  }
+  // A dump and an installed app can share an id; the scan keeps one tile, so
+  // the folder has to be found from the dump roots, not from the merged entry.
+  const bool found_dump = dump_source_locked(id, source, sizeof source, &source_size);
+  if (found_dump) std::snprintf(kind, sizeof kind, "dump");
+  const bool busy = g_pack.active;
+  pthread_mutex_unlock(&g_lock);
+
+  // A folder tile carries no size. Walk it once, outside the lock, so the
+  // progress bar means something on a 60 GB dump and the UI stays responsive.
+  if (source[0] && source_size <= 0) source_size = folder_bytes(source, 0);
+
+  if (busy) {
+    std::snprintf(message, cap, "A console pack is already running. Wait for it to finish.");
+    return false;
+  }
+  if (!source[0]) {
+    std::snprintf(message, cap, "%s is no longer in the library. Rescan, then try again.", id);
+    return false;
+  }
+  if (std::strcmp(kind, "dump") != 0) {
+    std::snprintf(message, cap,
+                  "Only a dump is packed here. A package is already packed, and an image is "
+                  "mounted as it is.");
+    return false;
+  }
+
+  char output[512] = {0};
+  if (!pack_output_path(id, output, sizeof output)) {
+    std::snprintf(message, cap, "There are already too many console packages for %s. Delete one first.", id);
+    return false;
+  }
+
+  char safe_source[700];
+  char safe_output[700];
+  jescape(safe_source, sizeof safe_source, source);
+  jescape(safe_output, sizeof safe_output, output);
+  char request[1800];
+  std::snprintf(request, sizeof request,
+                "{\"request\":{\"source\":\"%s\",\"format\":\"pkg\",\"output\":\"%s\","
+                "\"kraken_level\":\"fast\"}}",
+                safe_source, safe_output);
+
+  char answer[1024] = {0};
+  const int status = http_call("POST", kPackStart, request, answer, sizeof answer);
+  if (status != 200) {
+    char why[320] = {0};
+    if (!json_string(answer, "error", why, sizeof why)) {
+      std::snprintf(why, sizeof why, "The on-console packer refused the job (HTTP %d).", status);
+    }
+    std::snprintf(message, cap, "%s", why);
+    return false;
+  }
+
+  const int job = std::atoi(answer);
+  if (job <= 0) {
+    std::snprintf(message, cap, "The on-console packer accepted the job but returned no id.");
+    return false;
+  }
+
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  pthread_mutex_lock(&g_lock);
+  g_pack.active = true;
+  g_pack.done = false;
+  g_pack.ok = false;
+  g_pack.engine_job = job;
+  std::snprintf(g_pack.id, sizeof g_pack.id, "%s", id);
+  std::snprintf(g_pack.output, sizeof g_pack.output, "%s", output);
+  g_pack.source_size = source_size;
+  g_pack.started_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+  std::snprintf(g_pack.message, sizeof g_pack.message, "Packing on the console…");
+  pthread_mutex_unlock(&g_lock);
+
+  std::snprintf(message, cap, "Packing %s on the console. This can take a while.", id);
+  return true;
+}
+
+/** Builds the status body. The output appearing is the success signal: the engine renames a verified .part. */
+void pack_status_json(char* out, std::size_t cap) {
+  PackJob snapshot;
+  pthread_mutex_lock(&g_lock);
+  snapshot = g_pack;
+  pthread_mutex_unlock(&g_lock);
+
+  bool active = snapshot.active;
+  bool done = snapshot.done;
+  bool ok = snapshot.ok;
+  int pct = 0;
+  char message[320];
+  std::snprintf(message, sizeof message, "%s", snapshot.message);
+
+  struct stat info;
+  const bool landed = snapshot.output[0] && ::stat(snapshot.output, &info) == 0 &&
+                      S_ISREG(info.st_mode) && info.st_size > 0;
+  if (landed) {
+    active = false;
+    done = true;
+    ok = true;
+    pct = 100;
+    std::snprintf(message, sizeof message, "Package ready: %s", snapshot.output);
+    pthread_mutex_lock(&g_lock);
+    g_pack.active = false;
+    g_pack.done = true;
+    g_pack.ok = true;
+    std::snprintf(g_pack.message, sizeof g_pack.message, "%s", message);
+    pthread_mutex_unlock(&g_lock);
+  } else if (active) {
+    // The engine writes <output>.<pid>-<n>.part and renames it when verified.
+    // Sum those parts: a rough percentage beats a spinner that never moves.
+    long long part = 0;
+    const char* base = std::strrchr(snapshot.output, '/');
+    base = base ? base + 1 : snapshot.output;
+    DIR* dir = ::opendir(kGames);
+    if (dir) {
+      struct dirent* entry;
+      while ((entry = ::readdir(dir)) != nullptr) {
+        if (std::strncmp(entry->d_name, base, std::strlen(base)) != 0) continue;
+        if (std::strstr(entry->d_name, ".part") == nullptr) continue;
+        char path[640];
+        std::snprintf(path, sizeof path, "%s/%s", kGames, entry->d_name);
+        struct stat part_info;
+        if (::stat(path, &part_info) == 0 && S_ISREG(part_info.st_mode)) part += part_info.st_size;
+      }
+      ::closedir(dir);
+    }
+    if (part > 0) {
+      pct = snapshot.source_size > 0
+                ? static_cast<int>((part * 100) / snapshot.source_size)
+                : 1;
+      if (pct > 95) pct = 95;
+      std::snprintf(message, sizeof message, "Packing on the console — %lld MB written",
+                    part / (1024 * 1024));
+    } else {
+      pct = 1;
+      std::snprintf(message, sizeof message, "Waiting for the on-console packer…");
+    }
+  } else if (!done) {
+    message[0] = '\0';
+    std::snprintf(message, sizeof message, "No console pack is running.");
+  }
+
+  char safe_message[420];
+  char safe_output[700];
+  char safe_id[32];
+  jescape(safe_message, sizeof safe_message, message);
+  jescape(safe_output, sizeof safe_output, snapshot.output);
+  jescape(safe_id, sizeof safe_id, snapshot.id);
+  std::snprintf(out, cap,
+                "{\"ok\":true,\"active\":%s,\"done\":%s,\"ok\":%s,\"pct\":%d,"
+                "\"kind\":\"pack\",\"id\":\"%s\",\"message\":\"%s\",\"output\":\"%s\"}",
+                active ? "true" : "false", done ? "true" : "false", ok ? "true" : "false", pct,
+                safe_id, safe_message, safe_output);
 }
 
 /**
@@ -2714,6 +2930,59 @@ int find_title_locked(const char* id) {
   return -1;
 }
 
+/** Sums regular files under a folder. Bounded in depth so a link loop cannot trap the caller. */
+long long folder_bytes(const char* path, int depth) {
+  if (depth > 12) return 0;
+  DIR* dir = ::opendir(path);
+  if (!dir) return 0;
+  long long total = 0;
+  struct dirent* entry;
+  while ((entry = ::readdir(dir)) != nullptr) {
+    if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0) continue;
+    char child[700];
+    std::snprintf(child, sizeof child, "%s/%s", path, entry->d_name);
+    struct stat info;
+    if (::lstat(child, &info) != 0) continue;
+    if (S_ISDIR(info.st_mode)) {
+      total += folder_bytes(child, depth + 1);
+    } else if (S_ISREG(info.st_mode)) {
+      total += info.st_size;
+    }
+  }
+  ::closedir(dir);
+  return total;
+}
+
+/**
+ * Finds the dump folder for an id. The library keeps one tile per id, so when a
+ * title is also installed the dump path is not in g_titles. These are the roots
+ * ShadowMount+ and the scan walk; both metadata files must be present, which an
+ * installed app's read-only folder does not satisfy in the same way.
+ */
+bool dump_source_locked(const char* id, char* out, std::size_t cap, long long* size) {
+  static const char* roots[] = {
+      "/data/homebrew", "/user/data/homebrew",
+      "/mnt/usb0", "/mnt/usb1", "/mnt/usb2", "/mnt/usb3",
+      "/mnt/usb4", "/mnt/usb5", "/mnt/usb6", "/mnt/usb7",
+      "/mnt/ext0", "/mnt/ext1",
+  };
+  for (const char* root : roots) {
+    char path[512];
+    std::snprintf(path, sizeof path, "%s/%s", root, id);
+    struct stat info;
+    if (::stat(path, &info) != 0 || !S_ISDIR(info.st_mode)) continue;
+    char meta[640];
+    char boot[640];
+    std::snprintf(meta, sizeof meta, "%s/sce_sys/param.json", path);
+    std::snprintf(boot, sizeof boot, "%s/eboot.bin", path);
+    if (::access(meta, F_OK) != 0 || ::access(boot, F_OK) != 0) continue;
+    std::snprintf(out, cap, "%s", path);
+    if (size) *size = 0;
+    return true;
+  }
+  return false;
+}
+
 /**
  * Serves the cached title list; the copy keeps the lock clear of the write.
  * The body carries a tag, so a poll that finds nothing new costs one 304
@@ -3224,6 +3493,78 @@ void handle(int fd) {
       scan_all();
       reply_games(fd, request);
     }
+    ::close(fd);
+    return;
+  }
+
+  // ---- packing a dump on this console, no Mac ----
+  if (std::strcmp(method, "GET") == 0 && std::strcmp(path, "/api/console-pack") == 0) {
+    char version[32] = {0};
+    const bool up = pack_engine(version, sizeof version);
+    char safe_version[64];
+    jescape(safe_version, sizeof safe_version, version);
+    char answer[512];
+    std::snprintf(answer, sizeof answer,
+                  "{\"ok\":true,\"available\":%s,\"engine\":\"ps5-dump-forge\","
+                  "\"version\":\"%s\",\"message\":\"%s\"}",
+                  up ? "true" : "false", safe_version,
+                  up ? "The on-console packer is loaded."
+                     : "Load PS5 Dump Forge 0.5.6 with elfldr on port 9021 to pack without a Mac.");
+    reply(fd, 200, answer);
+    ::close(fd);
+    return;
+  }
+
+  if (std::strcmp(method, "GET") == 0 && std::strcmp(path, "/api/console-pack/status") == 0) {
+    char answer[1400];
+    pack_status_json(answer, sizeof answer);
+    reply(fd, 200, answer);
+    ::close(fd);
+    return;
+  }
+
+  if (std::strcmp(method, "POST") == 0 && std::strcmp(path, "/api/console-pack") == 0) {
+    char id[16] = {0};
+    if (!json_string(body, "id", id, sizeof id)) {
+      reply(fd, 400, "{\"ok\":false,\"message\":\"Which dump should be packed?\"}");
+      ::close(fd);
+      return;
+    }
+    char version[32] = {0};
+    if (!pack_engine(version, sizeof version)) {
+      reply(fd, 409,
+            "{\"ok\":false,\"message\":\"Load PS5 Dump Forge 0.5.6 with elfldr on port 9021, then try "
+            "again. It is the on-console engine; this build has no native packer of its own.\"}");
+      ::close(fd);
+      return;
+    }
+
+    char message[420] = {0};
+    if (!pack_start(id, message, sizeof message)) {
+      char safe[520];
+      jescape(safe, sizeof safe, message);
+      char answer[640];
+      std::snprintf(answer, sizeof answer, "{\"ok\":false,\"message\":\"%s\"}", safe);
+      reply(fd, 409, answer);
+      ::close(fd);
+      return;
+    }
+
+    char output[512] = {0};
+    int engine_job = 0;
+    pthread_mutex_lock(&g_lock);
+    std::snprintf(output, sizeof output, "%s", g_pack.output);
+    engine_job = g_pack.engine_job;
+    pthread_mutex_unlock(&g_lock);
+    char safe_output[700];
+    char safe_message[520];
+    jescape(safe_output, sizeof safe_output, output);
+    jescape(safe_message, sizeof safe_message, message);
+    char answer[900];
+    std::snprintf(answer, sizeof answer,
+                  "{\"ok\":true,\"job\":%d,\"output\":\"%s\",\"message\":\"%s\"}",
+                  engine_job, safe_output, safe_message);
+    reply(fd, 202, answer);
     ::close(fd);
     return;
   }

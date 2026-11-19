@@ -17,14 +17,14 @@ Both are legitimate answers. The difference is what you pay and what you get.
 | Where the game runs from | Installed into the console's own storage through Sony's installer | Mounted from its source (internal, M.2, USB) |
 | Disk cost | One copy of the package | Cache only; the source stays where it is |
 | Formats | Game folders, `.exfat`, `.ffpfsc`, `.ffpfs`, `.ffpkg`, `.gp5`, debug `.pkg`, existing installed apps | Debug FPKG, plain folder, zstd folder, LZ4 folder |
-| Building a package | Yes — fpkg-cli, orbis-pub-cmd, LibProsperoPkg, or a custom command, with AC/DLC packing | No — it mounts what already exists; sparse-extent PKGs must be repacked (`--kraken stored`) |
+| Building a package | Yes — on the Mac, or on the console through Dump Forge; AC/DLC packing included | No — it mounts what already exists; sparse-extent PKGs must be repacked (`--kraken stored`) |
 | A dump that lives only on the console | Pulled to the Mac with a resumable, byte-verified transfer, then built | Mounted directly, no copy |
 | Scanning | Paths you choose, plus what the console reports from `/data`, `/user/data` and USB | Fixed roots, zero config: `/data/homebrew`, `/data/etaHEN/games`, drive roots, USB |
 | Interface | Native PS5 title drawn with VideoOut and the DualSense, plus a desktop app for the library | Web UI on the console |
 | DLC and PlayGo | Packed by `acpack` when you build | Bundled `dlc_emu` and `pgo_stub`, added automatically |
 | Saves and trophies | Untouched — the installed title uses the console's own modules | v0.3.0 stopped shadowing `libSceSaveData` after saves went missing (#64, #68) |
 | Failure reporting | Every failure carries a sentence and a name; simulated builds are labelled and refused by the console | Log lines and a title that does not appear |
-| Requirements | kstuff + elfldr, the native-app toolchain to build the title, a Mac with a packer | kstuff, ShadowMount+ stopped |
+| Requirements | kstuff + elfldr, the native-app toolchain to build the title, a packer (Mac, or Dump Forge on the console) | kstuff, ShadowMount+ stopped |
 | Console firmware | Payload runs on 13.20 (tested); 14.xx has no public exploit | Same exploit ceiling applies |
 | FPKG install/launch | Public kstuff ceiling is 11.60; 13.20 rejects with `0x80BD0005` | Mounts without installing, so it is the working route above 11.60 |
 
@@ -46,9 +46,10 @@ public kstuff installs and launches debug packages only through **11.60**.
 
 ## Where Prospero Vault is ahead
 
-* **It can make the package at all.** A dump is not playable as-is; something has
-  to build it. Kraken Mount mounts a debug FPKG and refuses the third-party
-  layouts it cannot read.
+* **It can make the package at all, on the console.** A dump is not playable
+  as-is; something has to build it. With Dump Forge loaded, Vault builds a
+  verified FPKG on the PS5 itself. Kraken Mount mounts a debug FPKG and refuses
+  the third-party layouts it cannot read.
 * **It installs and launches through Sony's own paths**, then keeps the result in
   a library with state, notes and a package on disk you can copy anywhere.
 * **Transfers that survive a real Wi-Fi link.** Range resume with a stall
@@ -63,10 +64,10 @@ public kstuff installs and launches debug packages only through **11.60**.
 
 ## What we are closing next
 
-1. **Packing on the console itself** — this is the big one. The current packer
-   is C#/.NET and cannot run in a FreeBSD payload; the enabling work is a native
-   port of the PKG/PFS writer, not a setting. Until that exists, Convert needs
-   the Mac.
+1. **Packing on the console itself** — done through Dump Forge on 8095, but it
+   is still a second payload. The next step is linking the engine into Vault so
+   no separate load is needed. FPKG *install* on 13.20 remains blocked by
+   kstuff/ppr-patch, not by the packer.
 2. **Zero-config discovery on the Mac** — offer `~/Downloads`, `~/Desktop` and
    mounted volumes as one-tap scan roots, so the first run asks for less.
 3. **Compressed folder dumps** (zstd, LZ4) on the pull path, so a packed dump on

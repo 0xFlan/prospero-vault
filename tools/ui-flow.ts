@@ -234,9 +234,12 @@ try {
   // Press a dump: that is the conversion flow.
   await evaluate(`document.querySelector('[data-id="PTST00003"]').click()`);
   const asked = await evaluate(
-    `(document.getElementById("scrim").textContent || "").includes("Convert to FPKG")`,
+    `(() => { const t = document.getElementById("scrim").textContent || "";
+      return t.includes("Pack ") &&
+        Boolean(document.querySelector('#scrim [data-action="packConsole"]')) &&
+        Boolean(document.querySelector('#scrim [data-action="confirmYes"]')); })()`,
   );
-  check("pressing a dump asks before packing", asked === true);
+  check("pressing a dump offers both packers before packing", asked === true);
 
   await evaluate(
     `[...document.querySelectorAll('#scrim [data-action]')].find((b) => b.dataset.action === "confirmYes").click()`,
@@ -273,7 +276,8 @@ try {
   // And the page is still alive afterwards: a fresh press has to answer again.
   await evaluate(`document.querySelector('[data-id="PTST00003"]').click()`);
   const reopened = await evaluate(
-    `(document.getElementById("scrim").textContent || "").includes("Convert to FPKG")`,
+    `(() => { const t = document.getElementById("scrim").textContent || "";
+      return t.includes("Pack ") && Boolean(document.querySelector('#scrim [data-action="packConsole"]')); })()`,
   );
   check("the interface still responds after a failure", reopened === true);
 
