@@ -116,7 +116,7 @@ serves the browser UI on this Mac only.
 | --- | --- |
 | **Open Prospero Vault** | Starts the server if needed and opens `http://127.0.0.1:8090/`. |
 | **Launch at Login** | Adds or removes the login item. The tick shows the current state. |
-| **Show Log** | Opens `~/Library/Logs/Prospero Vault.log`. |
+| **Show Log** | Shows `~/Library/Logs/Prospero Vault.log` in Finder. |
 | **Show Data Folder** | Opens `~/Library/Application Support/Prospero Vault`. |
 | **Quit Prospero Vault** | Stops the server it started and exits. |
 
