@@ -1,860 +1,75 @@
 # Prospero Vault
 
-A package library that runs **on the console** and behaves like a system app:
-an icon row across the top, a grid of what you own, one-tap conversion of a
-dump into an FPKG, and the finished package pulled onto the PS5.
+Prospero Vault turns a PS5 game dump into a debug FPKG and installs it with the
+console's own installer. The interface runs on the PS5, so you pick a game on the
+console and play it from the home screen. A small Mac app does the packing,
+because Sony's packers only run on a computer.
 
-![Library](docs/screens/view-library.png)
+This README covers both halves: the Mac app, the console payload, and the tests
+that show what works.
 
-## How it compares
+## The screens
 
-Kraken Mount (v0.3.0) mounts a game from the drive it already sits on; Prospero
-Vault builds a real debug FPKG and installs it through the console's own
-installer. Mounting costs no disk and no wait; installing gives you a title that
-behaves like any other, with a package on disk you can copy anywhere and a
-library that knows what state every game is in.
+![Library on the console](docs/screens/view-library.png)
 
-| | Prospero Vault | Kraken Mount v0.3.0 |
-| --- | --- | --- |
-| Builds a package from a dump | Yes — fpkg-cli, orbis-pub-cmd, LibProsperoPkg, or a command you set | No — mounts an existing debug FPKG or folder |
-| Runs from | The console's own storage, via Sony's installer | Its source (internal, M.2, USB) |
-| Disk cost | One copy | Cache only |
-| Formats | Folders, `.exfat`, `.ffpfsc`, `.ffpfs`, `.ffpkg`, `.gp5`, debug `.pkg` | Debug FPKG, plain / zstd / LZ4 folder |
-| Resumable, verified transfer | Yes | Not needed — nothing is copied |
-| DLC / PlayGo | Packed on the Mac | Bundled emulators |
-| Failure reporting | A named reason on every path; a simulated build is labelled and refused by the console | Log lines |
+**Library.** One tile per title. Each tile shows its format, name, size and title
+id. The bar at the top shows how many titles, dumps and packages were found, the
+Mac connection and free space.
 
-Full comparison, including where Kraken Mount is ahead and what we are closing
-next: [docs/COMPARISON.md](docs/COMPARISON.md).
+![Convert confirmation](docs/screens/view-confirm.png)
 
-## Name and artwork
+**Convert.** Press a dump and confirm. The Mac builds the package and the console
+downloads it. A finished package plays with one press; a new one installs first.
 
-**Prospero** is the PS5's codename; a *vault* is where the packages live.
+![Packages](docs/screens/view-packages.png)
 
-| File | Use |
-| --- | --- |
-| `public/icon.svg` | app icon (1024 grid, rounded-square, vault wheel) |
-| `public/hero.svg` | 16:9 home banner with wordmark |
-| `console/ui/index.html` | the same mark inline, so the payload needs no extra files |
-| `docs/screens/*.png` | the screens as rendered in the preview |
+**Packages.** Every package on the console, installed or waiting for install.
 
-The console UI cannot fetch images from the payload — the ELF serves the page and
-the API only — so the icon is inline SVG and the browser never asks for a file.
+![Console](docs/screens/view-console.png)
 
-## How it fits together
-
-```
-        the console                                    your Mac
-┌─────────────────────────────────┐          ┌──────────────────────────┐
-│  prospero-vault.elf  :8097      │          │  Prospero Vault  :8090   │
-│                                 │          │                          │
-│  scans /data, /user/data, USB   │  build   │  your packer:            │
-│  serves the UI (embedded)       │─────────▶│   fpkg-cli / orbis-pub   │
-│  thumbnail grid, icons          │◀─────────│   / a command you set    │
-│  pulls the finished .pkg        │  .pkg    │                          │
-└─────────────────────────────────┘          └──────────────────────────┘
-```
-
-One file goes to the console. Its interface is compiled into the ELF, so there
-is nothing else to copy and nothing to keep in sync.
-
-## The screen
-
-- **Rail** — Library, Packages, Console, Settings. The active category is a
-  white tile; focus is a white ring, exactly like Settings on the console.
-- **Library** — hero banner with counts, Mac link and free space, then one square
-  tile per title using `icon0.png` when the dump has one.
-- **Packages** — rows for what is already packaged, with Play.
-- **Console** — Mac link, storage, payload version, games folder, rescan.
-- **Settings** — the Mac address (`host:port`), rescan, version.
-- **Detail** — large art, type/size/status, Convert, Play, Back.
-- **Converting** — a dimmed screen with one thin bar, the current step, the
-  percentage and Cancel.
-- **Controller** — D-pad/left stick move, ✕ selects, ○ goes back, △ rescans.
-  Arrow keys and Enter do the same from a keyboard.
-
-## Why the Mac is still involved
-
-Packing an FPKG needs a desktop packer. Sony's Publishing Tools and
-`LibProsperoPkg` are desktop binaries; there is no way to run them on the
-console. So **Convert** asks the Mac to build and then pulls the result down:
-
-0. console asks `GET /api/ready/<TITLE_ID>` first — if the Mac already holds the
-   package, the pack is skipped and it goes straight to the transfer
-1. console: `POST http://<mac>:8090/api/build`
-2. console polls `GET /api/progress/<TITLE_ID>` for the percentage and step until
-   the package exists
-3. console downloads `/api/pkg/<TITLE_ID>` into `/data/prospero-vault/Games/`,
-   resuming from the `.part` with a `Range` request if an earlier try was cut off
-4. console rescans, so the new package appears as a tile
-
-Send to PS5 in the Mac app uses the same path in reverse: it asks the console to
-fetch (`POST /api/convert`), the console pulls on its own worker thread, and the
-Mac follows `/api/convert/status` so the library says what actually happened.
-The Mac sends its own `host:port` with that request, so the console learns where
-to pull from without anyone typing the address into Settings first.
-
-Both halves tidy up after themselves, so what is left at the end is the package
-and nothing else:
-
-- the Mac assembles each build in `data/tmp/<TITLE_ID>-<stamp>/`, moves the one
-  finished file to `data/pkg/<TITLE_ID>.pkg`, and deletes the scratch folder.
-- stale `*.part`, `*.tmp` and scratch folders are swept at startup.
-- the console writes the download to `<TITLE_ID>.pkg.part` and renames it only
-  after the full byte count has arrived. A failed transfer leaves nothing that
-  looks playable, and leftovers are cleared on the next start.
-
-## What the audit changed
-
-Everything below was a real defect found by reading the payload for a first
-hardware run, not polish:
-
-| Problem | Fix |
-| --- | --- |
-| A dropped connection mid-download was silently accepted, so half a package was renamed into place and looked playable | `Content-Length` is read from the response and the transfer must match it exactly, or the `.part` is deleted |
-| One stalled client froze the whole payload (single-threaded accept, blocking `recv`) | socket send/receive timeouts on every connection, outbound calls included |
-| `accept()` returning `EMFILE`/`EAGAIN` ended the payload | transient errors are retried with a short sleep |
-| A large `icon0.png` was cut at a fixed 512 KB buffer, producing broken tiles | icons stream in 16 KB chunks with the real `Content-Length` |
-| The games JSON had a 32 KB cap, so a full 200-title library produced truncated (unparseable) JSON | 96 KB buffer, larger name cap, UTF-8-safe truncation |
-| Scanning `/user/data` and eight USB mounts held the title lock for the whole walk, freezing the UI | the scan fills a scratch array and swaps it in under the lock |
-| Multi-gigabyte transfers sat at a flat 96% | the bar moves during the pull and shows `received / total` |
-| If the packer failed on the Mac the console polled for a full hour before giving up | progress now carries `state`/`message`; the console fails immediately and shows the reason |
-| No way to stop a long conversion | `POST /api/convert/cancel`, wired to the Cancel button |
-| Double-tapping Convert could queue the same title twice | the Mac tracks queued titles, and the console refuses to convert a title that is already a package |
-| `payload.log` grew forever | rotated to `payload.log.1` at 1 MB on startup |
-| `which` ran three subprocesses per UI poll | engine probe cached for 5 s |
-| A build whose source folder had been moved failed late, after the queue | the source path is checked before queueing |
-
-A second pass, for the hardware test:
-
-| Problem | Fix |
-| --- | --- |
-| Every request was served on the accept loop, so one slow icon or a rescan froze the whole interface, and the parse buffer was `static` | one detached worker thread per connection (24 at once, 512 KB stacks), per-connection buffers, and a refusal instead of `EMFILE` when saturated |
-| `POST /api/scan` walked every mount on the serving thread | it claims the scan, starts a worker and answers `202` at once; the grid fills in from the poll |
-| `/api/games` re-serialised the whole library and wrote into a shared `static` buffer on every poll | serialised once per scan into a cache and copied out under the lock |
-| Every redraw re-read each `icon0.png` from flash | 32-entry / 12 MB LRU icon cache, cleared on each scan |
-| A full disk looked like a successful transfer, because write errors were ignored, and the rename could publish unwritten bytes | writes are checked, the file is `fsync`ed, and the rename only happens after that |
-| A dropped Wi-Fi link restarted a multi-gigabyte pull from zero | the console keeps the `.part` and continues with `Range: bytes=N-`; the Mac answers `206` and a stale partial is detected by size |
-| Convert always asked the Mac to pack, even when the package was already there | `/api/ready` is checked first, so a second convert is just a transfer |
-| An unreachable Mac could block `connect()` for about 75 seconds | non-blocking connect with a 6-second limit, plus socket timeouts on outbound calls |
-| Send to PS5 posted to `/api/install`, which the payload never had | it now asks the console to fetch, and the Mac follows the console's own progress |
-| The Mac address went into a request line unchecked | `host` / `host:port` is validated before it is stored |
-| Send to PS5 only worked if the console had already been told the Mac's address | the Mac sends its address with the job and the console adopts it |
-| A dump and a package with the same title id could leave the tile showing the dump, with no Play | the package wins the scan |
-| Log lines from different threads could interleave | a log mutex |
-
-A third pass, for the first hardware run and the one-tap path:
-
-| Problem | Fix |
-| --- | --- |
-| A converted package could not be started: Play launched a title the console had never installed | the payload installs it here with the console's own installer and starts it — one tap, no PC, no mount payload |
-| The interface could not tell an installed title from a downloaded file | every title carries `installed`, read with `sceAppInstUtilAppExists` on each scan |
-| `http_call` wrote every response into one `static` buffer while Play and a conversion could both be using it | a per-call buffer |
-| If the Mac restarted mid-pack the console polled a dead job for an hour at a frozen percentage | `404` and twenty silent polls both fail immediately with something to do about it |
-| Converting while a game ran pulled gigabytes and competed for the game's disk and Wi-Fi | `409` with the reason, instead of quietly degrading play |
-| The payload's HTTP contract was only checked by a script in `/tmp` | `tools/payload-check.sh` (`bun run check:payload`) builds a host payload and asserts the whole contract |
-
-## Play
-
-Play starts the title on the console. The payload calls Sony's own launcher —
-`sceLncUtilLaunchApp`, then `sceSystemServiceLaunchApp` — after reading the
-foreground user, because the launcher rejects a user id of `0`. The symbols come
-from the SDK's link stubs (`libSceSystemService`, `libSceUserService`,
-`libSceAppInstUtil`), which the console binds when the ELF loads. They ship
-without headers, so `main.cpp` declares the prototypes and the Makefile links
-the three libraries.
-
-Three details decide whether that feels right:
-
-- `sceSystemServiceLaunchApp` returns the **new app id** on success, so only a
-  negative value is a failure. Reading it as "must be zero" fires a second
-  launch at a title that is already starting — and the shell responds by pushing
-  the game into the background, the "opens then instantly minimises" bug.
-- An already-running title gets exactly one request: the payload foregrounds it,
-  returns `409`, and never launches again.
-- Success is confirmed by polling `sceLncUtilIsAppLaunched` for up to three
-  seconds, instead of trusting a return code Sony does not report reliably.
-
-When ShadowMountPlus happens to be running (`POST 127.0.0.1:10101/api/v1/version`
-answers), the payload asks it for the two things it cannot do itself — the
-fake-library policy a debug FPKG needs, and a mount for a disc image — then
-launches. When it is not running, Play still calls Sony's launcher directly.
-Nothing is bundled and **no cache is built**, so playing costs no extra disk and
-there is no rebuild step before a game starts.
-
-A dump folder is not launchable, and `/api/play` says so with `409` instead of
-failing somewhere inside the shell.
-
-## Install, then play
-
-A `.pkg` sitting in the library is not the same as an installed title: the shell
-will not start a package it has never installed. That used to be the end of the
-road here. It is now the one thing Play handles for you.
-
-- `sceAppInstUtilAppInstallPkg(path, NULL)` hands the local file to the
-  **console's own installer** — the same component Debug Settings uses. There is
-  no third-party mount payload, no PC in the middle, and no rebuild step.
-- The call returns as soon as the console accepts the package; the install then
-  runs on Sony's service. So progress is not guessed: the payload polls
-  `sceAppInstUtilAppExists(titleId, &exists)` and only says "ready" when the
-  console says the title exists. The bar creeps across a four-minute span rather
-  than claiming a percentage nobody reported.
-- `POST /api/play` on an uninstalled package answers `202 {"installing":true}`
-  and starts it the moment the install lands. `POST /api/install` does the same
-  without launching, for when you just want it on the console.
-- Every tile says `Installed` or `Needs install`, from a single
-  `sceAppInstUtilAppExists` per package during the scan. The button reads
-  *Install & play* when that is what will happen.
-- One background task at a time: a conversion and an install share one slot, so
-  two of them can never fight over the same disk and the same Wi-Fi.
-- Installing is refused while a game runs (`409`, with the reason). It is also
-  refused with `501` on a host build, which has no installer and must not
-  pretend otherwise.
-
-The one thing that stays true: this is the console's installer. A package built
-for another firmware, or one that is not a debug package, is turned down by the
-console, and the payload passes its error code straight through instead of
-inventing a friendlier story.
-
-## The app's own tile
-
-Prospero Vault is in the home screen's app row, and pressing its tile opens this
-interface full screen — no browser around it, no bookmark to find. It installs
-itself: on first run the payload writes a title folder and the home screen picks
-it up.
-
-There is no FPKG and no signing in that path, which is what made it look
-impossible. Every store in this space — ProsperoStore, Pegasus DL+, Playden,
-RecompStore — is a folder registered by the **ShadowMountPlus** payload, and the
-console treats a registered folder as a title like any other. What the folder
-needs is a native `eboot.bin` and `sce_sys/param.json`:
-
-```
-/data/homebrew/PVLT00001/
-  eboot.bin              the console's web-app shell
-  sce_sys/param.json     title id, name, and deeplinkUri
-  sce_sys/icon0.png      512x512, drawn by tools/icon.py
-```
-
-`deeplinkUri` is the address the shell opens, so the tile lands on
-`http://127.0.0.1:<port>/`. That one field is the whole difference between a
-tile that opens this interface and a tile that does nothing: the eboot is the
-console's own web-app shell (`/system_ex/app/NPXS40106/eboot.bin`), which is how
-the Homebrew Launcher and Sonic Loader tiles work too. The icon is embedded in
-the payload, so the tile is drawn by the app itself.
-
-Console → **Home screen app** writes it (or repairs it) and asks
-ShadowMountPlus for a scan so the tile appears at once instead of at its next
-fifteen-second pass. Details that decide whether it starts at all are in
-`docs/home-screen-apps.md` — the title ID must be four letters and five digits,
-and every file must be `777`, or the console answers `CE-107750-0`.
-
-A folder on disk is not a tile, so that row does not claim one. It asks
-ShadowMountPlus per title (`POST /api/v1/games/info`, not the whole library,
-whose answer is larger than one reply here can hold) and reports **Installed**
-only when the payload says it holds `PVLT00001`. Until then it says **Pending**,
-and the message names why: nothing answering on `127.0.0.1:10101`, or a scan path
-that does not include `/data/homebrew`.
-
-Pressing the row when it is installed asks before it removes: the folder is
-deleted, the title uninstalled and a scan requested, and a marker file keeps the
-next start from putting the tile back. The folder goes first on purpose —
-ShadowMountPlus refuses to uninstall the title that is currently running, which
-is this one, and a registration whose source is gone is dropped by the scan that
-follows.
-
-## The console's own path
-
-A launched package takes exactly the route a game bought from the store takes:
-
-1. `sceAppInstUtilAppInstallPkg` puts it in `/user/app/<titleId>` and registers
-   it with the shell — the same component Debug Settings uses.
-2. The shell mounts it from there and owns the mount. Nothing emulates a
-   filesystem, and no third-party payload sits in the middle.
-3. `sceLncUtilLaunchApp` asks the shell to start it, the same call Play uses.
-
-Step 1 is also what gives the **game** its own tile. The shell registers an
-installed title in the home screen's games row, so a package installed here
-starts from the home screen like any other game: this app does not have to be
-open, and nothing is emulated for it to appear. That is why Play installs before
-it launches instead of mounting the package itself.
-
-The payload used to ask ShadowMountPlus for a "fake library" before launching a
-package. That is gone: once the console has installed a title there is nothing
-left to fake, and an extra mount layer would be a *different* path, not the
-normal one. ShadowMountPlus is now involved only for disc images — the one
-format the shell cannot attach by itself — and if nothing is listening on
-`127.0.0.1:10101` the list marks that image `native: false`, Play is disabled,
-and the payload explains that converting it to a package installs it natively.
-
-### Processors, memory, and what a payload can actually say about them
-
-A game's CPU and memory budget is assigned by the shell when it starts; a
-payload cannot raise it, nor steer a title onto different cores, and this
-project does not pretend to. What the payload controls is **its own** footprint
-while a title runs, and that is now as close to zero as it can be:
-
-- the 12 MB icon cache is freed the moment a launch succeeds — it is the
-  payload's largest allocation, and no icon is read during play;
-- no scanning, and a scan request answers `202` and defers;
-- one watchdog wakeup every ten seconds, and nothing else;
-- the interface stops polling and stops its controller loop while its tab is
-  hidden, so the browser is not competing with the game either.
-
-Measured frame-time impact of all that: not measured, and there is no honest way
-to claim one from a Mac. The claim here is only that the payload is idle during
-play, not that a game runs faster.
-
-## A dump that lives only on the console
-
-The packers run on this Mac, and the console has none. Until now that meant the
-dump had to already be on the Mac — which is not how anyone's files are
-arranged: the dump is on the PlayStation. The console now serves its own dump
-and the Mac pulls it:
-
-1. the console asks the Mac to build with `{"titleId": "…", "pull": true}`;
-2. `GET /api/tree/<titleId>` streams the dump's file list as it walks it — the
-   console writes the JSON straight to the socket, so a dump with tens of
-   thousands of files needs no matching buffer;
-3. `GET /api/dump/<titleId>/<path>` streams each file with its real
-   `Content-Length`;
-4. the Mac pulls four files at a time into `data/pulled/<titleId>`, streams each
-   one to disk rather than into memory, reads `param.json` or `param.sfo` for the
-   title, registers it in the library, and packs it with whichever engine is
-   configured;
-5. the finished package comes back to the console and installs natively.
-
-A path coming from the console is treated as untrusted on both sides: the Mac
-refuses absolute paths, `..` and backslashes, and the payload confines every
-request to the dump's own root before it opens anything.
-
-`data/pulled` is kept so a re-pack does not pull gigabytes again. Delete it
-whenever the space is wanted; nothing else refers to it.
-
-## Installed apps are part of the library
-
-An FPKG that is already installed should not need its `.pkg` file to still be
-lying around. The scan also walks `/user/app`, where the console keeps installed
-titles, and lists them as `app`: `installed` and `native` both true, title read
-from `sce_sys`, icon from `sce_sys/icon0.png`. Play is then a single launcher
-call — no install, no mount, no copy. If that directory is not readable by the
-payload the walk is simply empty, and everything else behaves as before.
-
-## A placeholder is never reported as success
-
-The packers are optional, so the app can run with none configured. In that case
-the simulated engine writes a 1.4 MB file that is explicitly not a package.
-Earlier this pass the console would download it and report "Package received",
-which is a lie the player only discovers when the install fails.
-
-Now `simulated` travels with `/api/ready`, and the console checks it **before**
-both the transfer and the wait: it refuses the job with
-*"Your Mac has no packer configured, so it built a placeholder…"* and keeps the
-placeholder off the console entirely. The dump pull that already happened is
-kept, so configuring a packer and pressing Convert again does not repeat it.
-
-## What it reads
-
-| Source | Title id from | Shown as | Play |
-| --- | --- | --- | --- |
-| PS5 dump folder | `sce_sys/param.json` | `PS5` | after conversion |
-| PS4 dump folder | `sce_sys/param.sfo` | `PS4` | after conversion |
-| `.pkg` (FPKG) | filename | `FPKG` | yes |
-| `.exfat`, `.ffpkg`, `.ffpfs`, `.ffpfsc` | filename | `IMG` | mounted, then launched |
-
-A package or an image wins over a dump of the same title, because it is the copy
-that can actually start. Only the SFO was read before, which hid every PS5 dump
-that shipped just a `param.json`.
-
-## Loading fast, and staying out of the way
-
-- The payload **listens before it scans**. On a console with USB drives the walk
-  takes seconds; serving first means the page paints at once and the grid fills
-  in with a "Looking for games" state instead of a blank screen.
-- `/api/games` carries an `ETag`. The interface polls that list, and an
-  unchanged library now costs a `304` rather than ninety-odd kilobytes. It also
-  keeps the body it last received and paints nothing when the body is identical.
-- `/api/scan` claims the walk and answers `202` immediately, so the button is
-  acknowledged at once and the grid fills in behind it. A second press is
-  deferred instead of queueing a second walk of the same mounts.
-- The scan no longer `stat()`s every entry in every tree: the directory entry
-  already says what an entry is, and only a package or an image needs a size.
-  On a full USB drive that was the walk's dominant cost.
-- Titles are sorted case-insensitively by name, so the grid is in the same order
-  every boot instead of in directory order.
-- Icons stay in a 32-slot / 12 MB cache, are sent with `max-age=600`, carry the
-  library tag as `?v=`, and are `loading="lazy"`, so a long library neither
-  re-reads flash on the way back up nor opens thirty connections at once.
-- A poll that changes nothing now costs zero DOM work: the grid is only rebuilt
-  when the body differs, and a rebuild keeps the scroll position and the focused
-  tile. Before, every poll re-created all the tiles and jumped the page to the
-  top — the flicker that made the library feel slow even when it was not.
-- Polling adapts: 1 s while a scan is filling the grid, 6 s once it has settled,
-  nothing at all while the tab is in the background, and an immediate refresh
-  when it comes back.
-- If another payload already owns port 8097, the payload tries 8098–8104 and
-  logs which it took, rather than dying with a line nobody reads.
-- While a title is running, `/api/scan` answers `202` and defers, no icon is
-  read, and the page stops polling and stops its controller loop: the game gets
-  the I/O and the CPU. The flag clears on its own when the title exits.
-
-## Frame rate and upscaling
-
-Worth being blunt, because it decides where the effort goes: **the payload
-cannot change how a game renders.** A title's frame rate, resolution and
-upscaler belong to its own renderer, and PS5 exposes no supported entry point
-for a homebrew payload to raise a game's internal resolution, force 60 fps or
-insert an upscale pass. Anything claiming otherwise is either a per-title patch
-or a capture-layer filter, neither of which this project ships.
-
-What the console *can* be made to do well is everything around the game, and
-that is where this pass spent its effort:
-
-- the interface itself runs on the console's compositor, so the 60 fps that is
-  achievable is the menu's — hence the render gate, composited scale instead of
-  relayout, `contain` on tiles and `content-visibility` for offscreen ones;
-- while playing, the payload is idle: no scan, no icon reads, a five-second
-  watchdog and nothing else;
-- starting a title is one launcher call with no cache to build, so the wait
-  before the game's first frame is Sony's own launch, not ours.
-
-PS4 titles on a PS5 run in the console's own compatibility profile, which is
-fixed per title and not something a payload can override.
-
-## Getting it onto the console
-
-```bash
-make -C console          # -> console/build/prospero-vault.elf
-```
-
-Your console is at **192.168.4.100**, and its web file manager is at
-`http://192.168.4.100:8888/` — that is the transfer route:
-
-1. open `http://192.168.4.100:8888/` and go into `data/`
-2. go into `prospero-vault/` under `/data` (create it if it is not there; the
-   payload also creates it on first start)
-3. upload `console/build/prospero-vault.elf` into `/data/prospero-vault/`
-4. **load it with elfldr on port 9021** — point elfldr at
-   `/data/prospero-vault/prospero-vault.elf`
-
-Copying the file does not start it: a payload has to be loaded, and the ELF is
-the whole app.
-
-Then open:
-
-```
-http://127.0.0.1:8097      on the console itself
-http://192.168.4.100:8097  from your phone or laptop
-```
-
-The app asks the Mac for builds, so the console has to know where the Mac is.
-This Mac is at `192.168.4.26:8090`: type that into Settings once, or write
-`/data/prospero-vault/config.json` as `{"mac":"192.168.4.26:8090"}` and it is
-picked up at startup.
-
-## Preview it without a console
-
-```bash
-bun run preview          # http://localhost:8094
-bun run dev              # http://localhost:8090, the Mac app
-```
-
-The preview serves the exact file that is embedded in the ELF, with the
-payload's API contract — including health, cancel and the `.part`-then-rename
-download. `/api/convert` proxies to the real app on `:8090`, so the convert flow
-is real. The demo tiles (`PTST00001`–`PTST00005`) are generated fixtures: two
-PS4-style SFO dumps, one PS5 `param.json` dump, a package and a disc image, so
-every format the payload classifies appears on the grid.
+**Console.** Mac address, storage, payload version, games folder and rescan. The
+Home screen app row installs or removes the console icon for this interface.
 
 ![Settings](docs/screens/view-settings.png)
-![Convert prompt](docs/screens/view-confirm.png)
 
-## What is verified, and what is not
+**Settings.** Set the Mac address here once. The console uses it for every build.
 
-Verified on this Mac:
+![Mac app](docs/screens/mac-app.png)
 
-- the payload cross-compiles clean with `-Wall -Wextra`:
-  `console/build/prospero-vault.elf`, 183,520 bytes, x86-64 FreeBSD, UI embedded,
-  pthread workers linked
-- the same payload source, built for this Mac and driven over real sockets
-  against the real Mac app: 24 concurrent `/api/games` answers identical, a
-  700 KB icon whole twice, CRLF in the Mac address refused, a convert that packs
-  and pulls a byte-identical package while `/api/games` keeps answering, a second
-  convert that skips the pack and resumes from 500,000 bytes, a stale `.part`
-  discarded, and Send to PS5 followed through to `installed`
-- the UI renders and navigates at 1280×720 with no console errors, against the
-  real API contract: rail, hero, tiles, detail sheet, progress modal
-- a full conversion from the new UI: `202` → progress steps → package pulled →
-  `.pkg` tile appeared (the mock engine, so the package is a placeholder)
-- the Mac app's own suite: `bun run test` — 247 checks covering discovery, real
-  `param.sfo` parsing, build, serving, `Range` resume, deploy, a 60-cycle soak,
-  a mixed good/bad dump soak across a restart, the cross-site guard, loopback
-  binding, and that a build leaves no temporary files or scratch folder behind
-- `bun run check:app` — 34 checks: the built bundle launched with no Bun or
-  dotnet on PATH, serving API and UI, rejecting cross-origin mutations, building
-  a real package, driving the menu handlers (login item install/remove through
-  `launchctl`, launchd starting the app from that item, console URL, quit), and refusing off-host connections in
-  loopback mode
-- `bun run check:gate` — 43 checks: the real payload built for this Mac on the
-  LAN, preflight passing with all 14 lines, both delivery paths building
-  byte-identical packages, each new precondition broken in turn with no job
-  created, and the gate again after a restart
-- `bun run check:dumps` — 52 checks over synthesized PkgEditor-style, uppercase,
-  DLC, 240 MB-payload, missing-metadata, no-eboot and bad-content-id dumps,
-  every one through scan → import → build
+**The Mac app.** The same library in a browser: Convert for new builds, Console
+for the connection, Settings for the packer and the LAN address.
 
-**Not verified:** the payload has never run on a PS5. Its scanner, its
-thread-per-connection loop, its writes to `/data/prospero-vault`, its icon cache,
-its resumed pull from the Mac and its 512 KB thread stacks are unproven on
-hardware — that is what the real test is for.
+![Convert on the Mac](docs/screens/mac-convert.png)
 
-In particular **the launch path itself has never started a game**. The ELF links
-and the code follows the failure modes documented by payloads that do this, but
-`sceLncUtilLaunchApp` being accepted on your firmware is exactly the kind of
-thing only the console can answer. The first run should be a package you can
-also start from Settings, so a refusal is unambiguous. Packages themselves are
-real now: the bundled `acpack` builds them with the managed SHA3 patch, and the
-validator accepts every shape in `bun run check:dumps` — but none of those has
-been installed on a console yet.
+**Convert on the Mac.** Point the app at a dump folder, scan, then build. The
+list shows what each build used and whether it produced a package.
 
-## Start here: the hardware gate
+## What you need
 
-Before a dump is touched, one command reports every precondition for both
-delivery paths, with the reason and the fix for each failure:
+- A PS5 that can load homebrew payloads, with `elfldr` on port 9021 and a file
+  manager on port 8888. This guide uses `192.168.4.100` as the console address.
+- A Mac on the same network. The app carries its own Bun runtime and `acpack`,
+  so you do not install Bun or .NET.
+- A decrypted game dump: a folder with `eboot.bin` and `sce_sys/param.json`.
+  PS4 dumps with `param.sfo` work too.
+
+## Install the Mac app
 
 ```bash
-bun run dev                       # the companion Mac app
-bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097
-```
-
-```
-  PASS  companion Mac: app answers /api/state                       http://127.0.0.1:8090
-  PASS  companion Mac: a real packer is available                   bundled packer (or a configured command)
-  PASS  companion Mac: advertises a LAN address (not loopback)      http://192.168.4.26:8090
-  PASS  companion Mac: answers over that LAN address                http://192.168.4.26:8090/api/state → 200
-  PASS  dump: eboot is a decrypted ELF (not an encrypted blob)      ELF64, e_machine 0x3e, 2 program headers
-  PASS  dump: eboot is retail-shaped, not this payload's stub       compiled executable, PT_LOAD segments present
-  PASS  dump: readable folder with metadata and eboot               /dumps/PPSA01234-app
-  PASS  dump: param.json carries the fields the packer needs        titleId, contentId, titleName and version are present and well-formed
-  PASS  console: address configured                                 192.168.4.100:8097
-  PASS  reachability: Mac → console (this app reaches the payload)  payload 0.11.0 at http://192.168.4.100:8097
-  PASS  console: /data writable with space for the package          109.3 GB free, 2.0 GB needed
-  PASS  console: knows this Mac's LAN address                       192.168.4.26:8090 (taught now)
-  PASS  reachability: console → Mac (payload probes the Mac)        192.168.4.26:8090 answered in 3 ms
-  PASS  console-direct: console lists this dump                     not required for --path both; the Mac will send the package
-
-14/14 preconditions passed
-```
-
-Exit code is `0` when every line passed, `1` when one did not, `2` for a usage
-mistake. Nothing is built while a precondition fails, and each run writes its
-checks and outcome to `data/last-gate.json`.
-
-What the lines mean, and what a failure says to do:
-
-- **reachability, both directions.** `Mac → console` is this app fetching the
-  payload's health. `console → Mac` is a separate request the *payload* makes to
-  the Mac's advertised address; the two are reported independently, so a one-way
-  firewall shows up as `reachability: console → Mac … did not answer the console
-  — allow the Mac's port 8090 through the firewall`, while `Mac → console` stays
-  PASS. A console that has never heard from this Mac is taught the address once;
-  a console holding a *different* address fails with `the console holds
-  "192.168.4.99:8090", not 192.168.4.26:8090` rather than being silently
-  overwritten.
-- **console: /data writable with space.** The payload creates and removes a file
-  in `/data/prospero-vault` and reports the result; the line fails with `the
-  console could not write to /data/prospero-vault — check that /data is mounted
-  read-write`, or when free space is below the package's size plus headroom.
-- **dump: eboot is a decrypted ELF.** Reads the first 64 bytes. A blob without
-  `\x7fELF` fails with `has no \x7fELF header — the dump is still encrypted or
-  truncated; decrypt it before packing`. The packer itself accepts an encrypted
-  eboot and produces an unplayable package, which is why this is checked first.
-- **dump: eboot is retail-shaped.** The payload ELF used by the synthetic
-  fixtures is called out instead of passing for a game.
-- **dump: param.json fields.** `titleId` (`PPSA01234`), `contentId`
-  (`UP0000-PPSA01234_00-XXXXXXXXXXXXXXXX`), `titleName` and `version` are
-  validated; a failure names each bad field and its expected shape.
-- **console-direct: console lists this dump.** Only required for `--path
-  console`; for the Mac path the line reads `not required for --path mac; the Mac
-  will send the package`.
-
-`--path console` requires the dump to be on the console already (copy it to
-`/data/prospero-vault/Games`, then rescan there). `--path mac` requires the dump
-here; the console learns the title from the package it fetches, so it does not
-need the dump in its own scan. Omitting `--path` reports both.
-
-### Console-direct (the dump is on the console)
-
-1. copy the dump into `/data/prospero-vault/Games/` on the console, rescan there
-2. `bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097 --path console --run`
-3. the gate starts the console's Convert job, the Mac pulls the dump, builds, and
-   the console downloads the package; the run ends with
-   `console 202; done — Package received · 781.4 KB` (the size is the dump's)
-4. the package is `/data/prospero-vault/Games/PPSA01234.pkg` on the console
-
-Without `--run`, press Convert on the console itself after the gate passes — the
-same path, started from its own screen.
-
-### Companion Mac (the dump is on the Mac)
-
-1. `bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097 --path mac --run`
-2. the Mac imports and builds, then asks the console to fetch the package:
-   `deploy 200 {"ok":true,"detail":"The console is fetching the package.",…}`
-3. the console pulls it over the LAN, rescans, and the tile appears
-
-A Mac-held dump is not required to be in the console's scan: the payload accepts
-the job because the Mac already holds the finished package. `bun run check:gate`
-exercises exactly this, with the real payload source built for this Mac on the
-LAN, the retail-shaped fixture built once through each path, byte comparison
-between the Mac's package and the console's copy, each new precondition broken
-in turn (unreachable console, console that cannot reach the Mac, encrypted
-ebout, unwritable `/data`) with the run stopping and creating no job, and the
-whole gate again after a Mac restart.
-
-## Point it at a real dump
-
-A supported dump is a folder holding the content a PS5 would install:
-
-```
-PPSA01234/                 the folder name does not matter
-  sce_sys/
-    param.json             titleId, titleName, contentId, version, category
-    icon0.png              optional, shown in the library
-  eboot.bin                the game executable
-  ...                      everything else in the dump
-```
-
-- **Any folder name works**, including a title-named folder from a backup and a
-  content-id-named folder for DLC.
-- **Case does not matter**: `SCE_SYS/PARAM.JSON` and `EBOOT.BIN` are found, which
-  is what archive tools and Windows copies produce.
-- **Extra files are fine** — readmes, `.DS_Store`, `__MACOSX`. They are copied
-  into the package, so delete anything large you do not want shipped.
-- **`param.sfo` dumps** (PS4 trees) are read too; `acpack` decides what they
-  become.
-- **DLC** is a dump whose `param.json` says `applicationCategoryType: "ac"`;
-  it is packaged in AC mode.
-- **Dumps over 200,000 files** are listed as truncated and refused rather than
-  walked for an hour.
-
-Scan the folder in Convert, press Add, then Build. With no configuration the app
-uses the bundled packer (`packer/build.sh` builds it once). A folder that looks
-like a dump but cannot be one — metadata without an `eboot.bin`, or an `eboot.bin`
-with no metadata — is listed under **Not dumps** by path instead of disappearing
-from the scan.
-
-### What the diagnostics mean
-
-Every rejection names the file or field and ends the job as `error` — the queue
-keeps working, and a good dump submitted after it still builds.
-
-| Message | What to do |
-|---|---|
-| `... has eboot.bin but no sce_sys/param.json` | the copy is incomplete; recopy the dump including `sce_sys/` |
-| `... has sce_sys metadata but no eboot.bin` | the copy is incomplete; recopy the dump including its executable |
-| `acpack: sce_sys/param.json: missing contentId` | the dump's metadata is incomplete; use the dump tool's own export |
-| `acpack: '<value>' is not a valid content id` | `contentId` must be `XXYYYY-XXXXXXXXX_00-` plus 16 characters |
-| `acpack: sce_sys/nptitle.dat must be 160 bytes` | a broken or hand-edited `nptitle.dat`; restore the original |
-| `acpack: sce_sys/nptitle.dat has a bad magic` | same: the file was replaced, not copied |
-| `this is a retail package` | retail `.pkg` files are encrypted to the buying console and cannot be re-signed |
-| `update content (gp) is not supported` | patches need their base title; package the base game instead |
-
-The synthetic shapes behind these checks are generated, never shipped:
-`tools/dump-fixtures.ts` makes a PkgEditor-style tree, an uppercase/odd-name
-tree with junk files, a DLC tree, a 240 MB payload tree, a folder with no
-metadata and a dump with an invalid content id. `bun run check:dumps` drives all
-of them through scan → import → build and asserts the package magic, size and
-one-package-per-title behaviour.
-
-## Layout
-
-```
-console/main.cpp             payload: scan, HTTP, convert, icons, cancel, play
-console/ui/index.html        the whole interface, one file
-console/tools/embed.py       turns the UI into a C array
-app/                         the Mac app: packers, library, HTTP API
-tools/selftest.ts            end-to-end check of the Mac side
-tools/preview-console-ui.ts  serves the console UI on this Mac
-public/                      the Mac app's own page, icon.svg, hero.svg
-docs/screens/                UI screenshots
-```
-
-## Security
-
-Plain HTTP, no authentication, bound to `0.0.0.0`. That is a home-network
-assumption: anyone who can reach port 8097 can see your library and ask your Mac
-to build; anyone who can reach 8090 can read package paths. Do not expose either
-port to the internet.
-
-## Audit: reliability and coverage
-
-A pass over both sides for reliability, universality and package support. What
-it found and what changed:
-
-1. **A dump with more than 20,000 files was copied partially and packaged as if
-   whole.** The console's file list stopped at 20,000 and said so (`truncated`),
-   and the Mac never read the flag — so the package installed and then failed.
-   The list now runs to 200,000 and the Mac refuses a truncated one instead of
-   building from it. This was the worst bug in the project: silent, and it only
-   showed up on the titles least likely to be tested by hand.
-2. **Pulls had no retries.** One dropped packet failed a 60 GB transfer. There
-   are now three attempts with backoff, each resuming from the bytes already on
-   disk; a 4xx answer is never retried.
-3. **Files whose size the tree did not report were treated as complete whatever
-   arrived.** They are now checked against the response's own `Content-Length`.
-4. **Two pulls of the same title could run at once**, writing the same files
-   from two workers. One pull per title now.
-5. **The free-space check ran before `data/pulled` existed**, so on a first run
-   it silently did nothing and a pull could fill the disk.
-6. **Dumps not named after a title id were invisible.** Both scanners now
-   identify a dump by the `sce_sys` metadata inside it, not by its folder name —
-   which also covers DLC, whose folders are content ids.
-7. **DLC did not appear at all.** The payload now walks `/user/addcont` and adds
-   one tile per content id. Keying by title id would have collapsed a season
-   pass into a single entry, so each piece gets a stable content-keyed id.
-8. **Additional content could be built by the application packer**, producing a
-   package that installs as the wrong kind of thing. That is now refused, with
-   the AC packer command as the remedy.
-9. **A packer that exited 0 having written something else was accepted.** Every
-   PS5 container starts with `0x7F`; output without it never reaches the library.
-10. **A failed rebuild erased the last good package** from the library record
-    even though the file was still on disk. It is kept until a new one exists.
-11. **Resumable `.part` files were deleted at startup**, throwing away bytes a
-    retry could have used. They are kept for a week.
-12. **The packer log was re-read in full every 200 ms**; it is now read
-    incrementally, so a long build does not get slower as it logs.
-13. Custom commands gain `{category}` (`ac`, `gp`, or empty) besides
-    `{source}`, `{titleId}`, `{title}`, `{output}` and `{pkg}`.
-
-Verified after the changes: payload builds with the console toolchain; the
-44-check payload contract suite passes; the 23-check Mac suite passes; a folder
-named `Some Game` containing `sce_sys/param.json` is discovered with its `ac`
-category while a title-id folder still resolves.
-
-### What is supported, by source type
-
-| Source | Detected | Pull | Package | Play |
-|---|---|---|---|---|
-| PS5 folder dump (`sce_sys/param.json`) | yes, any folder name | yes | application | after install |
-| PS4 folder dump (`sce_sys/param.sfo`) | yes | yes | depends on the packer — `fpkg-cli` decides what a PS4 tree becomes | after install |
-| Additional content, local or `/user/addcont` | yes, one tile per content id | yes | AC, via `acpack` | n/a |
-| `.exfat` / `.ffpfsc` / `.ffpfs` / `.ffpkg` image | yes | yes, resumable, packed without extracting | packer-dependent | mount (needs ShadowMountPlus) |
-| Retail `.pkg` | yes, marked as such | — | refused: encrypted, cannot be re-signed here | — |
-| Update content (`gp`, `/user/patch`) | not scanned | — | refused: a patch builds against a base and the library has no patch mode | — |
-| Firmware image (PUP) | not a package | — | not supported | — |
-| A dump with more than 200,000 files | listed as truncated | refused | — | — |
-
-On "firmware types": nothing here flashes or repacks firmware, and a PUP is not
-a package. What does vary by firmware is the *dump* container — newer dumps are
-`.exfat` images rather than folder trees — and both shapes are handled: an image
-is pulled as one file with resume and packed directly, a folder is walked. The
-firmware-specific part that cannot be worked around is retail packages: their
-content is encrypted to the console that bought them.
-
-### Second pass: the failures that only show up under load
-
-1. **`/api/build` held the request for the whole pull.** Copying a 50 GB dump
-   from the console took an hour inside one HTTP call, while the console's
-   client gives up after 20 seconds — so the first conversion of a console-only
-   dump reported a failure that was not one, and carried on behind it. The Mac
-   now registers the title, answers `202` and copies in the background; the
-   console accepts `202` and follows it with the progress poll it already had
-   (measured: 2 ms to answer, progress answerable throughout). The package size
-   is read from the ready probe once the build finishes, so the space check
-   still runs before the download.
-2. **`library.json` and `config.json` were written in place.** A crash during a
-   save left a file the loader could not parse, which read as an *empty
-   library*. Writes are now to a temporary file, flushed and renamed, and the
-   loader restores `library.json.bak` if the primary is unreadable.
-3. **A crash left titles marked `building`/`installing` forever**, with nothing
-   running behind the spinner. They are repaired at boot.
-4. **The packer's exit code travelled in its log.** A packer that printed the
-   marker — or a marker split across a read window — read as "finished" while
-   it was still writing. It now goes into its own file.
-5. **The file listing was one socket write per file** — 100,000 writes for a
-   100,000-file dump. It is buffered now.
-6. **The address handed to the console could be a VPN or VM interface.** Virtual
-   adapters and link-local addresses are skipped, and Wi-Fi/Ethernet preferred.
-7. **A rejected build could leave output behind**; the staging folder is now
-   removed whatever the outcome.
-
-New permanent coverage: `bun run check:pipeline` (9 checks) covers the paths the
-other suites cannot reach — the packer exit code, the container-magic gate, a
-rejected build leaving nothing behind, and a pull that answers at once, stays
-pollable, is recorded on disk and is followed by a build.
-
-### The interface is the console's interface
-
-The screen is what the console shows, so it is held to the same standard as the
-rest: it has to look like part of the system software, and it must never trap
-the player.
-
-1. **The shell was a web-app shell.** A left sidebar with a logo and stacked
-   categories is the one shape the PS5 home does not use. The console puts a row
-   of icons across the top — label under each, the selected one filled white —
-   and keeps the content below full width; the 2026 home refresh moved the
-   system areas into that ribbon and left the row to games. The app now does the
-   same: a monogram, Library / Packages / Console / Settings across the top, the
-   clock at the right, content underneath. Settings and Console use the system's
-   list pattern — section header, icon, title, description, right-aligned value.
-2. **The palette is taken from the console**, not chosen: near-black ground
-   (`#0d0e12`), one white focus, `#f5f5f7` text, `#a9aab2` secondary text, and
-   PlayStation Blue `#0070d1` as the only accent. Display headings are 30px at
-   weight 300, the way the system sets large type.
-3. **Focus behaves like the system.** Switching tabs hands focus to the first
-   item in the content, and Up walks back into the icon row. A selected tile is
-   a white ring inset in its artwork; a selected row turns white with dark text.
-4. **"Not set" was painted as an error.** It is a neutral value, not a failure;
-   it is muted now and red is left to things that actually went wrong.
-5. **Two defects only pixels revealed.** The header class `.bar` collided with
-   the progress-bar style, so the shell inherited a 22px pill, clipped its own
-   icons and rendered as a grey strip. And the tile focus ring painted only its
-   bottom edge: a ring flush with the artwork's edge is shaved away by that
-   element's paint clipping, so it is inset 6px now.
-
-The earlier pass fixed what made it unusable rather than merely ugly: focus
-escaping into the grid behind a running job, dialogs opening on disabled rows, a
-job panel with no way out (now Hide plus a live progress chip), and a focus ring
-clipped at the edges of the grid. Those fixes are unchanged.
-
-Rendered in headless Chrome at 1920×1080 and 1280×720 — the browser panel was
-unavailable this pass — with the geometry checked: content starts at y=170, no
-horizontal overflow at either size, tiles are exactly 164×164. Screenshots in
-`docs/screens/`: `view-library.png`, `view-packages.png`, `view-console.png`,
-`view-settings.png`, `view-confirm.png`, `home-1280.png`, `zoom-focus.png`. The
-UI is embedded at build time; the payload rebuilt to 268,328 bytes and 44 + 23 +
-9 checks pass.
-
-Pressing a tile is the whole interaction now. A folder dump opens a small
-two-button system dialog — "Convert to FPKG?", Yes focused, No beside it — and
-nothing else. A package does the obvious thing without a panel in between: it
-plays, and if it has not been installed yet the console installs it first with
-`sceAppInstUtilAppInstallPkg`, which is what makes it appear on the home screen,
-then starts it with the system launcher. An already-installed title is a single
-launcher call. Disc images go straight to the mount-and-play path.
-
-The background is the system's ambient field rather than a flat fill: near-black
-with a very slow blue-grey drift, drawn as two composited gradient layers. Sony's
-own asset is not redistributable and is not sampled here; this reproduces the
-motion and tone, not the exact artwork, and it freezes under reduced-motion.
-
-## Install the Mac companion
-
-The Mac side ships as a menu bar app with its own runtime and packer, so a
-person needs neither Bun nor .NET:
-
-```bash
-./tools/build-app.sh          # or: bun run build:app
+./tools/build-app.sh
 open "build/Prospero Vault.app"
 ```
 
-The build produces `build/Prospero Vault.app` (about 140 MB: Bun, the
-self-contained `acpack`, the server and the UI). It needs macOS with the Xcode
-command line tools; the first build may take a minute while the packer is
-published.
+`bun run build:app` does the same. The Mac that builds it needs the Xcode
+command line tools and Bun. The result is `build/Prospero Vault.app` (about
+140 MB). Drag it to `/Applications` when it works.
 
-To distribute a signed copy, set the environment before building — each step is
-skipped cleanly when its variables are absent:
+The first build may take a minute. The script publishes `acpack` for this Mac,
+copies the Bun runtime, compiles the menu bar shell, and signs the bundle. With
+no signing identity it uses an ad-hoc signature, which runs on the Mac that built
+it.
+
+To sign and notarize for other Macs, set these before building:
 
 ```bash
 DEVELOPER_ID_APPLICATION="Developer ID Application: Name (TEAMID)" \
@@ -862,88 +77,234 @@ NOTARY_PROFILE="notary-profile" \
 ./tools/build-app.sh
 ```
 
-`APPLE_ID` + `APPLE_TEAM_ID` + `APPLE_APP_PASSWORD` work instead of
-`NOTARY_PROFILE`. Without them the app is ad-hoc signed and runs on the Mac that
-built it.
+You can use `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` instead of
+`NOTARY_PROFILE`. The script skips signing and notarization when the variables
+are absent.
 
 ### First run
 
-1. Drag the app to `/Applications` and double-click it. A **PV** item appears in
-   the menu bar; there is no Dock icon.
-2. It starts the same server the repo runs, on `:8090`, and keeps it alive while
-   the app is open. The data folder is
-   `~/Library/Application Support/Prospero Vault/data`; settings, the library
-   and packages live there, not in the repo.
-3. **Open Prospero Vault** opens `http://127.0.0.1:8090/` in the browser.
-   **Launch at Login** writes a login item (`com.prospero.vault`) pointing at
-   this app; **Show Log** opens `~/Library/Logs/Prospero Vault.log`; **Quit**
-   stops the server it started.
-4. Find this Mac's address with `ipconfig getifaddr en0` (usually
-   `192.168.4.26`). Put `192.168.4.26:8090` into the console's Settings, or let
-   the first package send teach it.
+1. Double-click the app. A **PV** item appears in the menu bar. There is no Dock
+   icon.
+2. The app starts the server on port 8090. Data lives in
+   `~/Library/Application Support/Prospero Vault/data`; the log is
+   `~/Library/Logs/Prospero Vault.log`.
+3. **Open Prospero Vault** opens `http://127.0.0.1:8090/`.
+   **Launch at Login** adds the app to your login items. **Show Log** and
+   **Show Data Folder** open those places. **Quit** stops the server.
+4. Find this Mac's address:
 
-Firewall: macOS may ask whether to allow incoming connections for the app the
-first time. Allow it, or the console can reach the Mac in one direction only —
-`bun run preflight` reports that as `reachability: console → Mac … did not
-answer the console`.
+   ```bash
+   ipconfig getifaddr en0
+   ```
 
-If the console is not being used at all, set `"bind": "loopback"` in
-`~/Library/Application Support/Prospero Vault/data/config.json` (or launch with
-`PV_BIND=loopback`). The UI then works on this Mac and the server refuses every
-off-host connection, including the console's.
+   Type `<that-address>:8090` into the console's Settings. You can also let the
+   first package send teach the console the address.
 
-### Security on the LAN
+5. Allow incoming connections if macOS asks. Without that, the console cannot
+   reach the Mac.
 
-Mutating requests (`POST`/`DELETE` to import, build, deploy, settings, scan and
-delete) are refused with `403` when a browser sends them from another origin;
-reads stay open, and the console payload — a native client that sends no
-`Origin` — keeps working. There is no shared secret between the two halves: the
-payload's contract has no field to carry one, so adding a token would break the
-path already proven on this network. Treat the pair as trusted-LAN software: do
-not port-forward either port, and use `"bind": "loopback"` when the console is
-not involved.
+If you never use the console, set `"bind": "loopback"` in
+`~/Library/Application Support/Prospero Vault/data/config.json`. The app then
+serves the browser UI on this Mac only.
 
-### If something is wrong
+## Put the payload on the console
 
-- **Menu says "Not running — open the log"**: open the log from the menu; a
-  port already in use is the usual cause (`lsof -nP -iTCP:8090 -sTCP:LISTEN`).
-  Quit the other copy, then reopen.
-- **The UI works locally but the console cannot build**: check the firewall
-  allows the app's incoming connections, and that the console's Settings hold
-  this Mac's current LAN address.
-- **The Mac cannot reach the console**: `bun run preflight --dump <dump>
-  --console <console>` names the direction that failed; the payload must be
-  loaded and listening on `:8097`.
-- **A build fails**: the job's card shows the packer's own sentence. The log has
-  the full command output.
-- **Sending this for support**: `~/Library/Logs/Prospero Vault.log`,
-  `~/Library/Application Support/Prospero Vault/data/last-gate.json`, the
-  `bun run preflight` output, and the console's `/data/prospero-vault/payload.log`.
+```bash
+make -C console
+```
 
-### What the app check proves
+The build writes `console/build/prospero-vault.elf`. To load it:
 
-`bun run check:app` boots the built bundle with `PATH=/usr/bin:/bin` (no Bun, no
-dotnet), and verifies: it serves `/api/state` and the console UI, reports its
-bundled packer as the engine, rejects a cross-origin mutation with `403` while
-accepting the same-origin and native ones, imports and builds a retail-shaped
-dump into a real `\x7FFIH` package, and in `PV_BIND=loopback` mode answers on
-`127.0.0.1` while refusing the LAN address.
+1. Open `http://192.168.4.100:8888/` and go to `data/`.
+2. Enter `prospero-vault/` (create it if needed).
+3. Upload `console/build/prospero-vault.elf`.
+4. Load `/data/prospero-vault/prospero-vault.elf` with `elfldr` on port 9021.
 
-It also drives the menu handlers through the bundle itself:
-`--action login-on` writes and loads `~/Library/LaunchAgents/com.prospero.vault.plist`
-(checked with `plutil -lint` and `launchctl list`), `--action login-off`
-unloads and removes it and is harmless when repeated, `--action url` returns the
-address **Open Prospero Vault** uses and that address answers `200`, and
-`--action quit` stops the instance so the port closes and no bundled server
-survives. The check also arms the agent, has `launchd` start the app from it the
-way login would, and quits that instance. These call the same functions the
-menu items call; the menu itself is not clicked by the check, so the status
-item drawing and mouse targets remain a human step.
+Copying the file alone does not start it. The ELF contains the server and the
+whole interface, so there is nothing else to upload.
 
-### Still hardware-only
+Open the interface on the console at `http://127.0.0.1:8097`, or from another
+device at `http://192.168.4.100:8097`.
 
-- Install and launch of a package have never run on a PS5.
-- The home-screen tile's `deeplinkUri` launch has never been pressed on a
-  console; the shell path can differ by firmware (`"shellEboot"`).
-- DLC acceptance and `.exfat` image mounting are unproven on hardware.
-- Patches (`gp`) are deliberately not built.
+## Convert a dump
+
+1. Put the dump on the Mac or in `/data/prospero-vault/Games/` on the console.
+2. Set the Mac address on the console, or start a build from the Mac app.
+3. Press the dump's tile and choose **Yes**.
+4. The console asks the Mac to build. The Mac pulls the dump if it only exists
+   on the console, builds the package, and the console downloads it.
+5. Press the finished package to install and play it.
+
+A dump is a folder shaped like this:
+
+```
+PPSA01234/
+  sce_sys/
+    param.json      titleId, titleName, contentId, version, category
+    icon0.png       optional
+  eboot.bin         the game executable
+```
+
+Folder names do not matter. Upper-case names and extra files are fine. DLC is a
+dump whose `param.json` has `applicationCategoryType: "ac"`. A dump with more
+than 200,000 files is refused instead of walked for hours.
+
+## Test with a real dump and a real console
+
+Run the gate before you convert anything:
+
+```bash
+bun run dev
+bun run preflight --dump "/path/to/PPSA01234-app" --console 192.168.4.100:8097
+```
+
+It checks all 14 preconditions for both delivery paths, including a decrypted
+`eboot.bin`, valid dump metadata, both directions of the network path, and
+writable console storage. It prints a PASS or FAIL line with a fix for each
+failure, then writes `data/last-gate.json`. Nothing is built while a check
+fails.
+
+When every line passes, add `--run` to build and deliver:
+
+```bash
+# dump is on the Mac
+bun run preflight --dump "/path/to/PPSA01234-app" \
+  --console 192.168.4.100:8097 --path mac --run
+
+# dump is on the console in /data/prospero-vault/Games
+bun run preflight --dump "/path/to/PPSA01234-app" \
+  --console 192.168.4.100:8097 --path console --run
+```
+
+The Mac path builds here and asks the console to pull the package. The console
+path starts the console's own Convert job, pulls the dump to the Mac, builds it,
+and sends the package back. Both end with the package in
+`/data/prospero-vault/Games/PPSA01234.pkg`.
+
+Without `--run`, press Convert on the console after the gate passes. It runs the
+same steps.
+
+## Supported sources
+
+| Source | Shown as | What happens |
+| --- | --- | --- |
+| PS5 dump folder (`sce_sys/param.json`) | PS5 | builds a package |
+| PS4 dump folder (`sce_sys/param.sfo`) | PS4 | builds a package if the packer supports it |
+| DLC (`applicationCategoryType: "ac"`) | PS5 | builds an AC package |
+| `.pkg` | FPKG | installs and plays |
+| `.exfat`, `.ffpkg`, `.ffpfs`, `.ffpfsc` | IMG | mounts with ShadowMountPlus, then plays |
+| Retail `.pkg` | FPKG | refused: encrypted to the buying console |
+| Update content (`gp`) | not listed | refused: patches are not supported |
+
+## What is verified
+
+Run everything with:
+
+```bash
+bun run test
+```
+
+| Command | Checks | What it covers |
+| --- | --- | --- |
+| `bun run test` | 324 | the self-check, gate and app suites |
+| `tools/selftest.ts` | 247 | discovery, `param.sfo` parsing, builds, serving, resume, deploy, soak tests, CSRF, loopback |
+| `bun run check:gate` | 43 | the real payload on the LAN, both build paths, broken preconditions, restart |
+| `bun run check:app` | 34 | the packaged app with no Bun or .NET, menu handlers, login launch, quit |
+| `bun run check:dumps` | 52 | synthetic dump shapes from scan to package |
+| `bun run check:pipeline` | 42 | background pulls, packer exit codes, failed builds, cleanup |
+| `bun run check:payload` | 68 | the payload's HTTP contract, built for this Mac |
+| `bun run check:ui` | 77 | the console interface in a browser |
+
+The payload compiles for the PS5 with no warnings. Its launch, install and scan
+paths have not run on a PS5. The first hardware run is the test that matters:
+
+- install a package built here;
+- start it from this app and from the home screen;
+- press the Home screen app tile;
+- open a DLC package;
+- mount an `.exfat` dump.
+
+Until those pass on a console, treat them as unproven. The build and transfer
+paths are tested against the real payload compiled for this Mac, not emulated.
+
+## Troubleshooting
+
+**The console cannot reach the Mac.** Allow incoming connections for the app in
+macOS Settings, then run the preflight again. The gate names the direction that
+failed.
+
+**The Mac cannot reach the console.** Check that the payload is loaded and
+listening on 8097. The console may have picked 8098 if 8097 was busy; the payload
+log says which port it took.
+
+**Port 8090 is already in use.** Quit the other copy:
+
+```bash
+lsof -nP -iTCP:8090 -sTCP:LISTEN
+```
+
+**The menu says "Not running".** Open **Show Log**. A port conflict or a missing
+bundle file is the usual cause.
+
+**A dump is rejected.** The message names the missing or bad file. Common cases:
+
+| Message | Fix |
+| --- | --- |
+| `has eboot.bin but no sce_sys/param.json` | recopy the dump with `sce_sys/` |
+| `has sce_sys metadata but no eboot.bin` | recopy the executable |
+| `missing contentId` | export the dump again with its metadata |
+| `has no \x7fELF header` | decrypt the dump first |
+| `this is a retail package` | retail packages cannot be re-signed |
+| `update content (gp) is not supported` | package the base game, not the patch |
+
+**A build fails.** The job card shows the packer's message. The log has the full
+command output.
+
+**Ask for help.** Send the log, `data/last-gate.json`, the preflight output, and
+`/data/prospero-vault/payload.log` from the console.
+
+## Security
+
+Both servers use plain HTTP and have no password. The Mac app rejects changes
+sent from another website, but anyone on your network can read the library and
+ask the Mac to build. Keep ports 8090 and 8097 on your home network. Do not
+forward them from your router. Use `"bind": "loopback"` when the console is not
+involved.
+
+There is no shared secret between the Mac and the console. The payload's API has
+no field for one, and adding one would break the path already tested on this
+network.
+
+## Develop
+
+```bash
+bun run dev        # Mac app on http://localhost:8090
+bun run preview    # console UI on http://localhost:8094
+make -C console    # PS5 payload
+```
+
+`bun run preview` serves the exact page embedded in the payload and proxies
+conversions to the Mac app. It uses generated demo titles, so you can test the
+interface without a console.
+
+The main folders:
+
+```
+console/main.cpp        payload: scan, HTTP, convert, install, play
+console/ui/index.html   the console interface
+app/                    the Mac app and packers
+public/                 the Mac app's page
+tools/                  checks and the app builder
+docs/screens/           screenshots used here
+```
+
+## Limits
+
+- The payload has never run on a PS5. Nothing in this repository can prove it
+  will until you load it.
+- The home-screen tile depends on the console's web-app shell. The path can
+  differ by firmware; `"shellEboot"` in `config.json` points at another one.
+- The payload cannot change a game's frame rate or resolution.
+- Patches (`gp`), firmware images and retail packages are not supported.
+- Signing and notarization need your Developer ID. The app check covers the
+  ad-hoc build on this Mac.
